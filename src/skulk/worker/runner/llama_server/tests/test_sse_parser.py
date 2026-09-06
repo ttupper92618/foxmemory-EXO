@@ -15,9 +15,9 @@ from skulk.worker.runner.llama_server.runner import (
     _SPEC_TYPE_FLAG,
     _draft_model_args,
     _gpu_layers_for_backend,
-    model_declares_reasoning,
     _parse_sse_line,
     _projector_server_args,
+    model_declares_reasoning,
 )
 
 
