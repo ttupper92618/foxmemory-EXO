@@ -130,3 +130,21 @@ def test_arguments_are_retyped_against_the_offered_schema() -> None:
     assert _calls(_run([(REASONING + call, 1)])) == [
         [("repeat", {"count": "3", "word": "hi"})]
     ]
+
+
+def test_parallel_channels_arrive_as_one_tool_call_response() -> None:
+    # The API stream stops at the first terminal tool chunk, so two channels
+    # must be coalesced into one response or the second call is lost.
+    second = (
+        "<|start|>assistant to=get_time<|message|><atem:function_calls>\n"
+        '<atem:invoke name="get_time">\n'
+        '<atem:parameter name="zone">America/Denver</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    chunks = _run([(char, 1) for char in REASONING + CALL + second])
+    assert _calls(chunks) == [
+        [("get_weather", {"city": "Denver"}), ("get_time", {"zone": "America/Denver"})]
+    ]
+    # The single call response precedes the terminal chunk.
+    kinds = [type(c).__name__ for c in chunks if c is not None]
+    assert kinds.index("ToolCallResponse") == len(kinds) - 2

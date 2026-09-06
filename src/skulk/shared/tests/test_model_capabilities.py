@@ -1054,9 +1054,12 @@ def test_runtime_card_accepts_vllm_reasoning_parser() -> None:
 
 def test_muse_glimmer_predates_the_in_process_llama_cpp_binding() -> None:
     card = _muse_card("unsloth/Muse-Glimmer-30B-GGUF")
-    profile = resolve_model_capability_profile(card.model_id, model_card=card)
-    assert family_predates_in_process_llama_cpp(profile)
-    generic = resolve_model_capability_profile(
-        ModelId("example/other"), model_card=_base_model_card("example/other")
+    assert family_predates_in_process_llama_cpp(card)
+    # Keyed on family identity: an explicit parser override on a custom card
+    # does not make the binding able to load the architecture.
+    overridden = _muse_card(
+        "unsloth/Muse-Glimmer-30B-GGUF",
+        runtime=RuntimeCapabilityCardConfig(output_parser=OutputParserType.Generic),
     )
-    assert not family_predates_in_process_llama_cpp(generic)
+    assert family_predates_in_process_llama_cpp(overridden)
+    assert not family_predates_in_process_llama_cpp(_base_model_card("example/other"))

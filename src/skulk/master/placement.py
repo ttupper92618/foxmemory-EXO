@@ -329,7 +329,7 @@ def _card_platform_backends(
             card.runtime.vllm_tool_call_parser if card.runtime is not None else None
         ),
         card_family_predates_in_process_binding=(
-            family_predates_in_process_llama_cpp(profile)
+            family_predates_in_process_llama_cpp(card)
         ),
     )
 

@@ -451,32 +451,30 @@ def parse_muse_glimmer(
 
     Feeds the detokenized stream through :class:`MuseGlimmerTextParser`: the
     ``to=self`` channel becomes ``is_thinking`` chunks, ``to=user`` becomes
-    content, and a tool-addressed channel is held until it closes and then
-    delivered as one :class:`ToolCallResponse` per channel (the message-level
-    coalescing the OpenAI shape wants happens in the API adapter, which stops
-    at the first terminal chunk, so calls are emitted as they close and the
-    terminal chunk follows them). Control markers never reach the caller.
+    content, and tool-addressed channels are accumulated until the message
+    ends and delivered as ONE :class:`ToolCallResponse` carrying every call.
+    That is the OpenAI shape (one assistant message, one ``tool_calls``
+    array) and it is what keeps parallel calls alive: the API stream stops at
+    the first terminal chunk, so a response per channel would deliver the
+    first call and drop the rest. Control markers never reach the caller.
     ``marker_by_id`` (see :func:`_muse_glimmer_marker_ids`) reconstructs a
     control marker whose delta arrived empty. Argument values are retyped
     against the offered ``tools`` schemas (the ATEM reader keeps scalars as
     strings by design), the same coercion the text dialect path applies.
     """
     parser = MuseGlimmerTextParser()
+    # Held until the message ends so several tool channels arrive together.
+    pending_calls: list[ToolCallItem] = []
 
     def _deliver(
         template: GenerationResponse, emissions: list[TextEmission | ToolCallEmission]
     ) -> Generator[ParserChunk]:
         for emission in emissions:
             if isinstance(emission, ToolCallEmission):
-                calls = (
+                pending_calls.extend(
                     coerce_tool_calls_to_schema(emission.calls, tools)
                     if tools
                     else emission.calls
-                )
-                yield ToolCallResponse(
-                    tool_calls=calls,
-                    usage=template.usage,
-                    stats=template.stats,
                 )
                 continue
             if emission.text:
@@ -501,6 +499,13 @@ def parse_muse_glimmer(
         yield from _deliver(response, parser.feed(text))
         if response.finish_reason is not None:
             yield from _deliver(response, parser.flush())
+            if pending_calls:
+                yield ToolCallResponse(
+                    tool_calls=list(pending_calls),
+                    usage=response.usage,
+                    stats=response.stats,
+                )
+                pending_calls.clear()
             # Always emit a terminal chunk so SSE clients close cleanly.
             yield response.model_copy(
                 update={

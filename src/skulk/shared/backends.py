@@ -226,9 +226,10 @@ _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 # engine's pin by months; a family that landed upstream in between (Muse
 # Glimmer, merged 2026-08-10, first shipped in b10353, while llama-cpp-python
 # 0.3.30 vendors a 2026-06-16 build) loads through ``llama_server`` only. The
-# call sites resolve the family from the capability profile, so registry,
-# bundled, and custom cards all hit the same gate; the table of affected
-# families is the resolver's, this is the platform consequence. Drop the gate
+# call sites key the gate on the card's family identity (family or model
+# id, which a card cannot override the way it can override its parser), so
+# registry, bundled, and custom cards all hit the same gate; the table of
+# affected families is the resolver's, this is the platform consequence. Drop the gate
 # for a family once the binding advances past its first supporting build.
 _FAMILY_GATED_ENGINES: Final[frozenset[EngineType]] = frozenset({"llama_cpp"})
 

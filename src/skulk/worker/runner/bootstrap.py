@@ -466,7 +466,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
                 else None
             ),
             card_family_predates_in_process_binding=(
-                family_predates_in_process_llama_cpp(profile)
+                family_predates_in_process_llama_cpp(shard.model_card)
             ),
         ),
         placement.backend_preference,
