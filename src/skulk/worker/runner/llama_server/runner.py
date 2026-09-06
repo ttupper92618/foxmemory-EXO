@@ -43,7 +43,8 @@ import httpx
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.constants import MAX_OUTPUT_TOKENS
-from skulk.shared.models.model_cards import OutputParserType
+from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.model_cards import ModelCard, OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -91,6 +92,9 @@ from skulk.worker.runner.llama_cpp.runner import (
 )
 from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
+)
+from skulk.worker.runner.llm_inference.reasoning_controls import (
+    muse_glimmer_strength_kwargs,
 )
 from skulk.worker.runner.llm_inference.scaffolding_scrub import (
     StreamingScaffoldingScrub,
@@ -380,7 +384,7 @@ def _draft_model_args(
     return []
 
 
-def _model_declares_reasoning(card: Any) -> bool:
+def model_declares_reasoning(card: Any) -> bool:
     """Whether the card advertises a reasoning/thinking capability.
 
     Drives ``--reasoning-format``: a reasoning model keeps llama-server's default
@@ -390,14 +394,34 @@ def _model_declares_reasoning(card: Any) -> bool:
     Without that, llama-server's ``auto`` can extract a plain model's prose into
     ``reasoning_content`` (observed with Gemma 4 served via ``--jinja``), leaving
     ``message.content`` empty for the client. Detection mirrors the capability
-    spine: an explicit ``reasoning`` card section or a ``thinking`` capability.
+    spine: an explicit ``reasoning`` card section, a ``thinking`` capability,
+    or a resolved profile whose family reasons intrinsically.
     """
     if getattr(card, "reasoning", None) is not None:
         return True
-    return "thinking" in (getattr(card, "capabilities", None) or [])
+    if "thinking" in (getattr(card, "capabilities", None) or []):
+        return True
+    # Families whose reasoning is intrinsic resolve it through the capability
+    # profile even when the card carries no reasoning section (the signed
+    # registry's Muse Glimmer card, compiled with no tooling/runtime/reasoning
+    # facts). Reading only the raw card here launched such a model with
+    # --reasoning-format none, so its to=self channel streamed as content.
+    if not isinstance(card, ModelCard):
+        return False
+    try:
+        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    except Exception as exc:  # noqa: BLE001 - an unreadable card just means no reasoning
+        logger.opt(exception=exc).warning(
+            f"capability resolution failed for {card.model_id}; "
+            "serving without a reasoning format"
+        )
+        return False
+    return profile.supports_thinking
 
 
-def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
+def reasoning_request_overrides(
+    task_params: Any, card: ModelCard | None = None
+) -> dict[str, Any]:
     """Map Skulk's thinking controls onto llama-server request fields.
 
     ``generation_kwargs`` carries sampling params but NOT thinking control, so
@@ -414,15 +438,23 @@ def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
     - ``reasoning_effort`` -> OpenAI-style effort for harmony models (gpt-oss).
       ``"none"`` is not a valid server value; disabling is expressed via
       ``enable_thinking=False`` instead, so it is dropped here.
+    - Muse Glimmer (resolved from ``card``) reads neither: its template steers
+      always-on reasoning with a ``reasoning_strength`` template kwarg, so the
+      effort is translated onto that and the other two levers are omitted.
     """
     overrides: dict[str, Any] = {}
+    effort = getattr(task_params, "reasoning_effort", None)
+    strength_kwargs = muse_glimmer_strength_kwargs(card, effort)
+    if strength_kwargs:
+        overrides["chat_template_kwargs"] = strength_kwargs
+        return overrides
     enable_thinking = getattr(task_params, "enable_thinking", None)
     if enable_thinking is not None:
         overrides["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
-    effort = getattr(task_params, "reasoning_effort", None)
     if effort is not None and effort != "none":
         overrides["reasoning_effort"] = effort
     return overrides
+
 
 
 # How long to wait for the server to finish loading the model and report healthy.
@@ -772,7 +804,7 @@ class Runner(ServedConcurrentDispatch):
             and card.runtime.output_parser == OutputParserType.Gemma4
         )
         reasoning_format_none = self._uses_channel_parser or not (
-            _model_declares_reasoning(card)
+            model_declares_reasoning(card)
         )
         n_ctx = self._serving_context_tokens
         try:
@@ -1159,7 +1191,11 @@ class Runner(ServedConcurrentDispatch):
         # Forward thinking-control (enable_thinking / reasoning_effort) to
         # llama-server. Without this a reasoning model thinks on every request and
         # can return empty content under a bounded budget (#428/#420).
-        body.update(reasoning_request_overrides(task.task_params))
+        body.update(
+            reasoning_request_overrides(
+                task.task_params, self.shard_metadata.model_card
+            )
+        )
         # Tool definitions change the rendered prompt, so include them before the
         # exact token-count request. _generate_with_tools sets the same fields
         # again before the real completion for local clarity.

@@ -132,6 +132,14 @@ def test_build_vllm_serve_args_shape() -> None:
     assert "--enable-prompt-tokens-details" in args
 
 
+def test_build_vllm_serve_args_reasoning_parser() -> None:
+    # A card-pinned reasoning parser reaches the server; without one vLLM
+    # streams a reasoning model's thinking inline as answer text.
+    args = _serve_args(reasoning_parser="muse_glimmer")
+    assert args[args.index("--reasoning-parser") + 1] == "muse_glimmer"
+    assert "--reasoning-parser" not in _serve_args()
+
+
 def test_build_vllm_serve_args_trust_remote_code() -> None:
     assert "--trust-remote-code" not in _serve_args(trust_remote_code=False)
     assert "--trust-remote-code" in _serve_args(trust_remote_code=True)

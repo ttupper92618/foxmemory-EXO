@@ -272,3 +272,25 @@ def test_engine_supports_multi_node() -> None:
     assert engine_supports_multi_node("mlx") is True
     assert engine_supports_multi_node("mlx_audio") is False
     assert engine_supports_multi_node("llama_cpp") is False
+
+
+def test_platform_compatible_backends_gates_new_families_off_in_process_llama_cpp() -> None:
+    """A family the pinned binding predates keeps only its served llama.cpp lanes."""
+    declared = frozenset(
+        {
+            "llama_cpp-vulkan",
+            "llama_cpp-cuda",
+            "llama_cpp-cpu",
+            "llama_server-vulkan",
+            "llama_server-cuda",
+            "mlx",
+        }
+    )
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_family_predates_in_process_binding=True,
+    ) == frozenset({"llama_server-vulkan", "llama_server-cuda", "mlx"})
+    assert (
+        platform_compatible_backends(declared, card_serves_vision=False) == declared
+    )

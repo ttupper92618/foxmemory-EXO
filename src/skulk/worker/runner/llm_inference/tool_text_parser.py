@@ -498,6 +498,73 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
     return calls
 
 
+_ATEM_BLOCK = re.compile(
+    r"<atem:function_calls>(?P<body>.*?)</atem:function_calls>", re.DOTALL
+)
+_ATEM_INVOKE = re.compile(
+    r'<atem:invoke\s+name="(?P<name>[^"]+)"\s*>(?P<body>.*?)</atem:invoke>',
+    re.DOTALL,
+)
+_ATEM_PARAMETER = re.compile(
+    r'<atem:parameter\s+name="(?P<name>[^"]+)"\s*>(?P<value>.*?)</atem:parameter>',
+    re.DOTALL,
+)
+
+
+def _atem_value(raw: str) -> Any:
+    """Type one ATEM parameter value the way the template wrote it.
+
+    The template renders lists and objects as JSON, booleans as ``true`` /
+    ``false``, ``None`` as ``null``, and everything else verbatim ("spaces for
+    string values are not stripped"). Only those JSON shapes are decoded here;
+    numbers stay strings so a string-typed parameter that happens to hold
+    digits is not retyped, and the shared schema coercion turns them into
+    numbers where the tool's schema says so.
+    """
+    stripped = raw.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            decoded = cast("object", json.loads(stripped))
+        except ValueError:
+            return raw
+        return decoded if isinstance(decoded, (dict, list)) else raw
+    if stripped == "true":
+        return True
+    if stripped == "false":
+        return False
+    if stripped == "null":
+        return None
+    return raw
+
+
+def atem_calls(text: str) -> list[ToolCallItem]:
+    """Parse Muse Glimmer's ATEM tool-call markup out of ``text``.
+
+    Reads every complete ``<atem:function_calls>`` block (Meta's protocol,
+    parsed with regular expressions by design: the template tells the model
+    the output "is not expected to be valid XML"), each ``<atem:invoke
+    name="...">`` inside it, and its ``<atem:parameter name="...">`` values.
+    Blocks without a closing marker are not calls: the message is still being
+    written, or was cut short, and a truncated call must not be executed.
+    Parallel calls in one block, or across blocks, are returned in order.
+    """
+    calls: list[ToolCallItem] = []
+    for block in _ATEM_BLOCK.finditer(text):
+        for invoke in _ATEM_INVOKE.finditer(block.group("body")):
+            arguments: dict[str, Any] = {}
+            for parameter in _ATEM_PARAMETER.finditer(invoke.group("body")):
+                arguments[parameter.group("name")] = _atem_value(
+                    parameter.group("value")
+                )
+            calls.append(
+                ToolCallItem(
+                    name=invoke.group("name"),
+                    arguments=json.dumps(arguments),
+                )
+            )
+    return calls
+
+
 def parse_tool_calls_from_text(
     text: str,
     tools: list[dict[str, Any]] | None = None,
@@ -534,6 +601,7 @@ def parse_tool_calls_with_remainder(
     - Llama ``<|python_tag|>`` calls, which use ``parameters`` rather than
       ``arguments`` and may chain several with ``;``
     - Mistral ``[TOOL_CALLS]`` arrays
+    - Muse Glimmer ATEM ``<atem:function_calls>`` blocks
     - an unmarked call object opening the message, which the model may keep
       writing after
 
@@ -571,6 +639,8 @@ def parse_tool_calls_with_remainder(
             return _finish(gemma_calls, tools), ""
         if tool_call_format == _Format.GptOss:
             return _finish(_harmony_tool_calls(text), tools), ""
+        if tool_call_format == _Format.Atem:
+            return _finish(atem_calls(text), tools), ""
         if tool_call_format != _Format.Generic:
             # A specialized format with no text dialect here (DSML parses at
             # the token level elsewhere) gets NO text inference at all:
@@ -611,7 +681,7 @@ def parse_tool_calls_with_remainder(
     # Mistral array) needs template truth this seam does not have and is
     # tracked as a follow-up.
     excluded_kinds = (
-        {"gemma4", "harmony"} if tool_call_format is not None else set()
+        {"gemma4", "harmony", "atem"} if tool_call_format is not None else set()
     )
     for marker, kind in (
         # Harmony is selected by its outer channel carrier, not only by the
@@ -622,6 +692,7 @@ def parse_tool_calls_with_remainder(
         ("<|channel|>", "harmony"),
         ("to=functions.", "harmony"),
         ("<|tool_call>", "gemma4"),
+        ("<atem:function_calls>", "atem"),
         ("<tool_call>", "generic"),
         ("<|python_tag|>", "python_tag"),
         ("[TOOL_CALLS]", "mistral"),
@@ -643,6 +714,8 @@ def parse_tool_calls_with_remainder(
         elif dialect == "gemma4":
             for block in _gemma_blocks(text):
                 calls.extend(gemma4_calls(block))
+        elif dialect == "atem":
+            calls = atem_calls(text)
         elif dialect == "generic":
             calls = _toolcall_block_calls(text)
         elif dialect == "python_tag":

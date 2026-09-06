@@ -789,7 +789,7 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 - `modalities: ModalitiesCardConfig | None`: supports_native_multimodal, supports_audio_input
 - `audio: AudioCardConfig | None`: kind (`tts`/`stt`), default_response_format, response_formats, supports_streaming, supports_realtime, supports_voice_listing, voices, ordered voice_catalog metadata (including optional bundled `reference_profile`), default_voice, supports_reference_audio, supports_translation, sample_rates. TTS `supports_streaming=true` enables the stable chunked HTTP/provider path without an experiment gate.
 - `tooling: ToolingCardConfig | None`: tool_call_format, supports_tool_calling, builtin_tools
-- `runtime: RuntimeCapabilityCardConfig | None`: prompt_renderer, output_parser, metal_fast_synch, mtp_heads, mtp_max_depth, mtp_sidecar_repo, mtp_norm_convention, mtp_concat_order, assistant_model_repo, served_spec_draft_repo, vllm_spec_draft_repo, each matching companion revision when separately hosted, and speculative_multi_node (set `false` where multi-node speculation measures slower than plain sharded decode, e.g. gemma-4-26B-A4B MoE, 2026-06-06 matrix: 30.2 plain vs 28.2 MTP on 2 nodes; single-node speculation unaffected; card-driven so the agreement collective stays rank-symmetric)
+- `runtime: RuntimeCapabilityCardConfig | None`: prompt_renderer, output_parser, metal_fast_synch, mtp_heads, mtp_max_depth, mtp_sidecar_repo, mtp_norm_convention, mtp_concat_order, assistant_model_repo, served_spec_draft_repo, vllm_spec_draft_repo, each matching companion revision when separately hosted, vllm_tool_call_parser and vllm_reasoning_parser (explicit vLLM server-side parser pins, no family fallback), and speculative_multi_node (set `false` where multi-node speculation measures slower than plain sharded decode, e.g. gemma-4-26B-A4B MoE, 2026-06-06 matrix: 30.2 plain vs 28.2 MTP on 2 nodes; single-node speculation unaffected; card-driven so the agreement collective stays rank-symmetric)
 - `placement: PlacementCardConfig` (the only section the planner reads directly, `master/placement.py`). `compatible_backends: frozenset[str]` is a **hard filter** (route only to nodes whose advertised `NodeResources.backends` intersect it; default `{"mlx"}`). `backend_preference: tuple[str, ...]` is a **soft, ordered** rank among those backends: the planner prefers a cycle that can serve an earlier-listed tag (`_cycle_backend_preference_score`) and the runner picks the earliest backend the node has. Backends use compound `<engine>-<compute>` tags (`mlx-metal`, `mlx_audio-metal`, `llama_cpp-vulkan`, `llama_cpp-rocm`, and so on; vocabulary + node probing in `src/skulk/shared/backends.py`); nodes also advertise the bare engine tag (`mlx`) for back-compat with original `{"mlx"}` cards, and `mlx_audio` for speech-capable macOS nodes when `mlx_audio` imports. The split is deliberate: filter answers "which nodes are allowed", preference answers "fastest for *this* model" (Vulkan vs ROCm performance is model-dependent), so a Vulkan-preferring model still degrades gracefully onto a ROCm-only node. Also `min_vram_gib` (hard), `max_context_tokens` (soft KV-budget cap), and `max_pipeline_split_layer` (hard upper boundary for later pipeline ranks when a model tail reuses earlier KV; constrained allocations are memory-checked before launch).
 
 ### Capability profile
@@ -805,8 +805,8 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 - `thinking_format: ReasoningFormat`: None_ / TokenDelimited / ChannelDelimited
 - `default_reasoning_effort`, `disabled_reasoning_effort`
 - `prompt_renderer: PromptRendererType`: Tokenizer / Gemma4 / Dsml
-- `output_parser: OutputParserType`: Generic / Gemma4 / GptOss / DeepseekV32
-- `tool_call_format: ToolCallFormat`: Generic / Gemma4 / GptOss / Dsml
+- `output_parser: OutputParserType`: Generic / Gemma4 / GptOss / DeepseekV32 / MuseGlimmer
+- `tool_call_format: ToolCallFormat`: Generic / Gemma4 / GptOss / Dsml / Atem
 - `builtin_tools: tuple[BuiltinToolType, ...]`
 
 ## Pipeline-parallel sharding strategies
@@ -839,6 +839,7 @@ Inventory snapshot; see #130 for consolidation plan.
 | NemotronH | ~210 | `NemotronHShardingStrategy` + Mamba2 hybrid cache |
 | GPT-OSS | ~180 | MLX: `parse_gpt_oss` (token-level Harmony parser via `openai_harmony`) + `GptOssShardingStrategy`. llama.cpp: `HarmonyTextParser` in `harmony_text_parser.py` reparses the harmony channel markers from llama.cpp's detokenized *string* deltas (the engine exposes no token ids), splitting `analysis`→reasoning / `final`→content and stripping markers; wired in `llama_cpp/runner._generate`, gated on `OutputParserType.GptOss`, and dependency-free (no MLX/openai_harmony) so it runs on non-Mac GPU nodes. |
 | Step 3.5 | ~95 | Sliding-window cache tracking in `auto_parallel.py:639-650` |
+| Muse Glimmer | ~450 | Family default in `capabilities.py` (`_is_muse_glimmer_family`: always-on channel reasoning, no toggle, default strength high, ATEM tools, `OutputParserType.MuseGlimmer`; `muse_glimmer_template_kwargs` maps `reasoning_effort` onto the template's `reasoning_strength`). MLX: `MuseGlimmerTextParser` in `llm_inference/muse_glimmer_text_parser.py` (pure Python, routes `to=self` to reasoning, `to=user` to content, tool-addressed channels through the shared ATEM reader, bounded marker hold-back) wrapped by `parse_muse_glimmer` in `model_output_parsers.py` (special-token ids reconstructed when a detokenizer drops them). Served engines parse natively (llama-server b10353+, vLLM 0.28 `muse_glimmer` tool and reasoning parsers); `llm_inference/reasoning_controls.py` translates effort to `chat_template_kwargs.reasoning_strength` for both served runners. In-process llama.cpp is gated off by the binding's llama.cpp vintage. |
 | Llama / Ministral | ~70 | `LlamaShardingStrategy` (default); the unmarked tool dialect (end-of-message stop token plus bare-object block opening, see "In-process tool-call dialects" below) in `utils_mlx.py` and `tool_parsers.make_text_dialect_parser` |
 
 ## In-process tool-call dialects
@@ -861,7 +862,7 @@ it entirely for their own token-level parsers (`parse_gpt_oss`,
 those MLX paths, not every MLX model.
 When the caller passes the model's resolved `tool_call_format`, dialect
 selection is card truth first: a Gemma-format model parses only its dialect, a
-gpt-oss model only harmony, and any other specialized format gets no text
+gpt-oss model only harmony, an ATEM-format model only ATEM, and any other specialized format gets no text
 inference at all (its foreign-marker or bare-object echoes are content). Only
 the Generic family, and callers with no profile, fall to text inference:
 there, a message opening with a valid JSON object is the unmarked dialect,
@@ -871,7 +872,9 @@ by the EARLIEST recognized marker in the text and parsed exclusively (the cross-
 carry another dialect's shape in either direction, so the outermost structure
 decides and no later branch rescans the message; a selected dialect that
 parses nothing yields no call rather than a fallback scan). Recognized
-dialects: harmony `to=functions.NAME` channels (gpt-oss); Gemma 4
+dialects: harmony `to=functions.NAME` channels (gpt-oss); Muse Glimmer ATEM
+`<atem:function_calls>` blocks (complete blocks only, `atem_calls`, shared with
+the MLX channel parser); Gemma 4
 `<|tool_call>call:NAME{...}<tool_call|>` blocks (only complete, quote-aware
 marker-delimited blocks parse, shared with the MLX family parser so both
 engines read one implementation); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM

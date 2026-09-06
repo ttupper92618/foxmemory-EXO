@@ -613,3 +613,99 @@ class TestRemainderPreservation:
         )
         assert calls is None
         assert remainder == ""
+
+
+class TestAtem:
+    """Muse Glimmer's ATEM markup: invoke/parameter tags inside a block."""
+
+    BLOCK = (
+        "<atem:function_calls>\n"
+        '<atem:invoke name="get_weather">\n'
+        '<atem:parameter name="city">Denver</atem:parameter>\n'
+        '<atem:parameter name="days">3</atem:parameter>\n'
+        '<atem:parameter name="opts">{"units": "c"}</atem:parameter>\n'
+        '<atem:parameter name="tags">["a", "b"]</atem:parameter>\n'
+        '<atem:parameter name="verbose">false</atem:parameter>\n'
+        '<atem:parameter name="note">null</atem:parameter>\n'
+        "</atem:invoke>\n"
+        "</atem:function_calls>"
+    )
+
+    def test_block_parses_with_template_typing(self) -> None:
+        name, args = _one(self.BLOCK)
+        assert name == "get_weather"
+        # Strings stay strings (digits included, schema coercion retypes them);
+        # JSON containers, booleans and null decode as the template wrote them.
+        assert args == {
+            "city": "Denver",
+            "days": "3",
+            "opts": {"units": "c"},
+            "tags": ["a", "b"],
+            "verbose": False,
+            "note": None,
+        }
+
+    def test_schema_coercion_retypes_numbers(self) -> None:
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "days": {"type": "integer"},
+                        },
+                    },
+                },
+            }
+        ]
+        calls, _ = parse_tool_calls_with_remainder(self.BLOCK, tools)
+        assert calls is not None
+        assert json.loads(calls[0].arguments)["days"] == 3
+
+    def test_parallel_invokes_in_one_block(self) -> None:
+        text = (
+            "<atem:function_calls>\n"
+            '<atem:invoke name="a">\n<atem:parameter name="x">1</atem:parameter>\n</atem:invoke>\n'
+            '<atem:invoke name="b">\n<atem:parameter name="y">2</atem:parameter>\n</atem:invoke>\n'
+            "</atem:function_calls>"
+        )
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert [call.name for call in calls] == ["a", "b"]
+
+    def test_unclosed_block_is_not_a_call(self) -> None:
+        assert parse_tool_calls_from_text(self.BLOCK[:-25]) is None
+
+    def test_multiline_string_value_is_kept_verbatim(self) -> None:
+        text = (
+            "<atem:function_calls>\n"
+            '<atem:invoke name="write">\n'
+            '<atem:parameter name="body">line one\n  "quoted" line two\n</atem:parameter>\n'
+            "</atem:invoke>\n</atem:function_calls>"
+        )
+        _, args = _one(text)
+        assert args["body"] == 'line one\n  "quoted" line two\n'
+
+    def test_card_truth_selects_only_atem(self) -> None:
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        echoed = '<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>'
+        calls, _ = parse_tool_calls_with_remainder(
+            echoed, tool_call_format=ToolCallFormat.Atem
+        )
+        assert calls is None
+        calls, _ = parse_tool_calls_with_remainder(
+            self.BLOCK, tool_call_format=ToolCallFormat.Atem
+        )
+        assert calls is not None and calls[0].name == "get_weather"
+
+    def test_another_format_never_mints_atem(self) -> None:
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        calls, _ = parse_tool_calls_with_remainder(
+            self.BLOCK, tool_call_format=ToolCallFormat.Gemma4
+        )
+        assert calls is None

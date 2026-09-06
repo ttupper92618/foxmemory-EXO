@@ -3,7 +3,10 @@ from pydantic import ValidationError
 
 from skulk.shared.models.capabilities import (
     ResolvedCapabilityProfile,
+    family_predates_in_process_llama_cpp,
+    muse_glimmer_template_kwargs,
     resolve_model_capability_profile,
+    uses_muse_glimmer_protocol,
 )
 from skulk.shared.models.model_cards import (
     AudioCardConfig,
@@ -952,3 +955,111 @@ def test_qwen3_coder_stays_excluded_from_thinking_default() -> None:
     card = _qwen3_card("mlx-community/Qwen3-Coder-30B-4bit", [])
     profile = resolve_model_capability_profile(card.model_id, model_card=card)
     assert profile.supports_thinking is False
+
+
+def _muse_card(model_id: str, **overrides: object) -> ModelCard:
+    card = ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_mb(100),
+        n_layers=52,
+        hidden_size=6656,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        family="muse-glimmer",
+        capabilities=["text", "vision"],
+    )
+    return card.model_copy(update=overrides) if overrides else card
+
+
+def test_muse_glimmer_family_default_contract() -> None:
+    # The registry compiles the family from the upstream model_type and emits
+    # no tooling/runtime/reasoning sections; the family default must still
+    # resolve the wire contract Meta's chat template fixes.
+    card = _muse_card("unsloth/Muse-Glimmer-30B-GGUF")
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert profile.supports_thinking is True
+    assert profile.supports_thinking_toggle is False
+    assert profile.thinking_format == ReasoningFormat.ChannelDelimited
+    assert profile.default_reasoning_effort == "high"
+    assert profile.disabled_reasoning_effort == "low"
+    assert profile.supports_tool_calling is True
+    assert profile.tool_call_format == ToolCallFormat.Atem
+    assert profile.output_parser == OutputParserType.MuseGlimmer
+    assert profile.supports_image_input is True
+    assert profile.supports_native_multimodal is True
+    assert uses_muse_glimmer_protocol(profile)
+
+
+def test_muse_glimmer_family_matches_on_model_id_alone() -> None:
+    card = _muse_card("mlx-community/Muse-Glimmer-30B-4bit").model_copy(
+        update={"family": ""}
+    )
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert profile.output_parser == OutputParserType.MuseGlimmer
+    assert profile.tool_call_format == ToolCallFormat.Atem
+
+
+def test_muse_glimmer_explicit_card_fields_still_win() -> None:
+    card = _muse_card(
+        "unsloth/Muse-Glimmer-30B-GGUF",
+        tooling=ToolingCardConfig(supports_tool_calling=False),
+        reasoning=ReasoningCardConfig(default_effort="medium"),
+    )
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert profile.supports_tool_calling is False
+    assert profile.default_reasoning_effort == "medium"
+    assert profile.output_parser == OutputParserType.MuseGlimmer
+
+
+def test_muse_glimmer_no_toggle_means_thinking_cannot_be_disabled() -> None:
+    card = _muse_card("unsloth/Muse-Glimmer-30B-GGUF")
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    # A request that asks to disable thinking on a no-toggle model keeps its
+    # explicit strength hint and drops the toggle, as the Phase 2 contract says.
+    assert resolve_reasoning_params("low", False, profile) == ("low", None)
+    assert resolve_reasoning_params(None, False, profile) == (None, None)
+    # A disable request is ignored on a no-toggle model (the shared adapter
+    # contract): the model cannot stop reasoning, so the template default
+    # applies and callers steer strength with an explicit effort instead.
+    assert resolve_reasoning_params("none", None, profile) == (None, None)
+    assert resolve_reasoning_params("minimal", None, profile) == ("minimal", None)
+
+
+def test_muse_glimmer_template_kwargs_map_effort_to_strength() -> None:
+    card = _muse_card("unsloth/Muse-Glimmer-30B-GGUF")
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert muse_glimmer_template_kwargs(profile, None) == {}
+    assert muse_glimmer_template_kwargs(profile, "xhigh") == {
+        "reasoning_strength": "xhigh"
+    }
+    assert muse_glimmer_template_kwargs(profile, "minimal") == {
+        "reasoning_strength": "low"
+    }
+    assert muse_glimmer_template_kwargs(profile, "none") == {
+        "reasoning_strength": "low"
+    }
+    generic = resolve_model_capability_profile(
+        ModelId("example/other"), model_card=_base_model_card("example/other")
+    )
+    assert muse_glimmer_template_kwargs(generic, "high") == {}
+
+
+def test_runtime_card_accepts_vllm_reasoning_parser() -> None:
+    runtime = RuntimeCapabilityCardConfig(
+        vllm_tool_call_parser="muse_glimmer",
+        vllm_reasoning_parser="muse_glimmer",
+    )
+    assert runtime.vllm_reasoning_parser == "muse_glimmer"
+
+
+def test_muse_glimmer_predates_the_in_process_llama_cpp_binding() -> None:
+    card = _muse_card("unsloth/Muse-Glimmer-30B-GGUF")
+    assert family_predates_in_process_llama_cpp(card)
+    # Keyed on family identity: an explicit parser override on a custom card
+    # does not make the binding able to load the architecture.
+    overridden = _muse_card(
+        "unsloth/Muse-Glimmer-30B-GGUF",
+        runtime=RuntimeCapabilityCardConfig(output_parser=OutputParserType.Generic),
+    )
+    assert family_predates_in_process_llama_cpp(overridden)
+    assert not family_predates_in_process_llama_cpp(_base_model_card("example/other"))

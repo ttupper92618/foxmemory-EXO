@@ -5,7 +5,7 @@ providing a normalized runtime profile that inference code can consume without
 sprinkling optional-field checks throughout the hot path.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from skulk.shared.models.model_cards import (
     AudioCardKind,
@@ -136,6 +136,95 @@ def _is_gpt_oss_family(profile_family: str, normalized_model_id: str) -> bool:
     return profile_family == "gpt-oss" or any(
         marker in normalized_model_id for marker in ("gpt-oss", "gpt_oss")
     )
+
+
+def _is_muse_glimmer_family(profile_family: str, normalized_model_id: str) -> bool:
+    """Muse Glimmer (Meta, 2026-08): channel reasoning plus ATEM tool calls.
+
+    Matched on the card family (the registry compiles ``muse-glimmer`` from the
+    upstream ``model_type``; bundled and custom cards may spell it with an
+    underscore) or on the model id, so an auto-imported quant resolves to the
+    family contract before any card declares it. The contract is fixed by the
+    chat template Meta ships with every artifact: reasoning is always on (the
+    template opens the ``to=self`` channel unconditionally, so there is no
+    toggle), strength is a template kwarg rather than an on/off switch, and
+    tool calls use the ATEM markup.
+    """
+    family = profile_family.lower().replace("_", "-")
+    return family == "muse-glimmer" or any(
+        marker in normalized_model_id
+        for marker in ("muse-glimmer", "muse_glimmer", "museglimmer")
+    )
+
+
+def uses_muse_glimmer_protocol(profile: ResolvedCapabilityProfile) -> bool:
+    """Whether a resolved profile speaks Muse Glimmer's channel/ATEM protocol."""
+    return profile.output_parser == OutputParserType.MuseGlimmer
+
+
+def family_predates_in_process_llama_cpp(card: ModelCard) -> bool:
+    """Whether the card's family postdates the in-process llama.cpp binding.
+
+    The platform gate in ``shared/backends.py`` subtracts the in-process
+    ``llama_cpp`` engine for these families; today that is Muse Glimmer alone
+    (upstream support 2026-08-10, after the build llama-cpp-python 0.3.30
+    vendors). Keyed on the family identity (card family or model id), which a
+    card cannot override the way it can override ``runtime.output_parser``,
+    so the signed registry's cards, bundled cards, and custom cards with
+    explicit runtime choices are all gated the same way.
+    """
+    return _is_muse_glimmer_family(
+        _infer_family(card.model_id, card), card.model_id.normalize().lower()
+    )
+
+
+#: Muse Glimmer's ``reasoning_strength`` template levels, in ascending order.
+MuseGlimmerReasoningStrength = Literal["low", "medium", "high", "xhigh"]
+
+_MUSE_GLIMMER_STRENGTH_BY_EFFORT: dict[ReasoningEffort, MuseGlimmerReasoningStrength] = {
+    # Reasoning cannot be switched off (the template opens the channel
+    # unconditionally), so the disabling efforts map to the lightest level the
+    # model was trained on rather than being dropped.
+    "none": "low",
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+}
+
+
+def muse_glimmer_reasoning_strength(
+    reasoning_effort: ReasoningEffort | None,
+) -> MuseGlimmerReasoningStrength | None:
+    """Map an OpenAI-style reasoning effort onto Muse Glimmer's strength level.
+
+    Returns ``None`` when no effort was requested, leaving the template's own
+    default (``high``) in force.
+    """
+    if reasoning_effort is None:
+        return None
+    return _MUSE_GLIMMER_STRENGTH_BY_EFFORT[reasoning_effort]
+
+
+def muse_glimmer_template_kwargs(
+    profile: ResolvedCapabilityProfile,
+    reasoning_effort: ReasoningEffort | None,
+) -> dict[str, str]:
+    """Chat-template kwargs that carry the request's effort to a Muse Glimmer model.
+
+    Muse Glimmer reads ``reasoning_strength`` (low / medium / high / xhigh),
+    not the ``enable_thinking`` toggle or the harmony ``reasoning_effort`` the
+    other families use, so every engine's prompt path (the MLX template call,
+    the llama-server and vLLM ``chat_template_kwargs`` request field) merges
+    this in. Empty for every other family and when no effort was requested.
+    """
+    if not uses_muse_glimmer_protocol(profile):
+        return {}
+    strength = muse_glimmer_reasoning_strength(reasoning_effort)
+    if strength is None:
+        return {}
+    return {"reasoning_strength": strength}
 
 
 def _is_qwen3_thinking_family(profile_family: str, normalized_model_id: str) -> bool:
@@ -320,6 +409,22 @@ def resolve_model_capability_profile(
                 "supports_tool_calling": True,
                 "output_parser": OutputParserType.GptOss,
                 "tool_call_format": ToolCallFormat.GptOss,
+            }
+        )
+    elif _is_muse_glimmer_family(profile.family, normalized_model_id):
+        profile = profile.model_copy(
+            update={
+                "supports_thinking": True,
+                # The template opens the reasoning channel unconditionally;
+                # requests steer how much with reasoning_strength instead.
+                "supports_thinking_toggle": False,
+                "thinking_format": ReasoningFormat.ChannelDelimited,
+                "default_reasoning_effort": "high",
+                "disabled_reasoning_effort": "low",
+                "supports_tool_calling": True,
+                "output_parser": OutputParserType.MuseGlimmer,
+                "tool_call_format": ToolCallFormat.Atem,
+                "supports_native_multimodal": supports_image_input,
             }
         )
     elif _is_qwen3_thinking_family(profile.family, normalized_model_id) and (

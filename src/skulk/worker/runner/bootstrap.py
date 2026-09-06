@@ -10,7 +10,10 @@ from collections.abc import Callable, Iterator
 import loguru
 
 from skulk.shared.constants import preferred_env_value
-from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.capabilities import (
+    family_predates_in_process_llama_cpp,
+    resolve_model_capability_profile,
+)
 from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     card_serves_speech,
@@ -444,6 +447,9 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     # card declares MODEL truth, and engines whose runner cannot serve one of
     # the card's declared capabilities (e.g. vision without served mmproj
     # support) are subtracted in code so the fallback probe cannot pick one.
+    profile = resolve_model_capability_profile(
+        shard.model_card.model_id, model_card=shard.model_card
+    )
     return resolve_node_engine(
         platform_compatible_backends(
             compatible_backends,
@@ -453,13 +459,14 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
                 shard.model_card.vision is not None
                 and shard.model_card.vision.has_pinned_projector
             ),
-            card_supports_tool_calling=resolve_model_capability_profile(
-                shard.model_card.model_id, model_card=shard.model_card
-            ).supports_tool_calling,
+            card_supports_tool_calling=profile.supports_tool_calling,
             card_vllm_tool_call_parser=(
                 shard.model_card.runtime.vllm_tool_call_parser
                 if shard.model_card.runtime is not None
                 else None
+            ),
+            card_family_predates_in_process_binding=(
+                family_predates_in_process_llama_cpp(shard.model_card)
             ),
         ),
         placement.backend_preference,

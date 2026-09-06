@@ -630,10 +630,15 @@ Gemma 4 dialect, whose family parser now delegates to the shared
 implementation, and the Mistral dialect, which deliberately replaces the
 tokenizer-supplied family parser and falls back to it for the upstream call
 form), while any other family parser the tokenizer supplies is used directly
-and gpt-oss and DeepSeek keep their own token-level parsers.
+and gpt-oss and DeepSeek keep their own token-level parsers. Muse Glimmer
+keeps a channel parser of its own on the MLX engine: its reasoning, answer,
+and tool calls are all channels of one grammar (`to=self`, `to=user`, and
+`to=<tool>` carrying Meta's ATEM markup), so one streaming parser owns the
+whole split and hands tool channels to the shared ATEM dialect reader.
 Some families wrap the call in markers: a `<tool_call>` block carrying Hermes
 JSON, Qwen3 XML, or GLM `<arg_key>`/`<arg_value>` pairs, a harmony
-`to=functions.NAME` channel, or a Mistral `[TOOL_CALLS]` array. Llama uses no
+`to=functions.NAME` channel, an ATEM `<atem:function_calls>` block, or a
+Mistral `[TOOL_CALLS]` array. Llama uses no
 opening marker at all: it writes the call object directly, sometimes prefixed
 with `<|python_tag|>`, and ends the message with `<|eom_id|>` rather than a
 closing marker. Skulk adds `<|eom_id|>` to the stop tokens for any model whose

@@ -24,7 +24,10 @@ from skulk.shared.backends import (
     resolve_node_backend,
 )
 from skulk.shared.data_plane_health import zenoh_isolated_nodes
-from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.capabilities import (
+    family_predates_in_process_llama_cpp,
+    resolve_model_capability_profile,
+)
 from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -313,6 +316,7 @@ def _card_platform_backends(
                 hardware_classes=node_resources.hardware_classes,
             )
         )
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
     return platform_compatible_backends(
         frozenset(compatible),
         card_serves_vision=card.vision is not None,
@@ -320,11 +324,12 @@ def _card_platform_backends(
         card_has_pinned_projector=(
             card.vision is not None and card.vision.has_pinned_projector
         ),
-        card_supports_tool_calling=resolve_model_capability_profile(
-            card.model_id, model_card=card
-        ).supports_tool_calling,
+        card_supports_tool_calling=profile.supports_tool_calling,
         card_vllm_tool_call_parser=(
             card.runtime.vllm_tool_call_parser if card.runtime is not None else None
+        ),
+        card_family_predates_in_process_binding=(
+            family_predates_in_process_llama_cpp(card)
         ),
     )
 

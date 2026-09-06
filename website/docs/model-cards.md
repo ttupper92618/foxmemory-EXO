@@ -338,7 +338,7 @@ Declares tool-calling behavior:
 - `builtin_tools`
   - optional list of builtin platform tool contracts such as `web_search`, `open_url`, or `extract_page`
 - `tool_call_format`
-  - expected tool-call output format such as `generic`, `gemma4`, `gpt_oss`, or `dsml`
+  - expected tool-call output format such as `generic`, `gemma4`, `gpt_oss`, `dsml`, or `atem` (Muse Glimmer's `<atem:function_calls>` markup)
 
 ### `[runtime]`
 
@@ -347,7 +347,7 @@ Declares runtime integration preferences:
 - `prompt_renderer`
   - prompt renderer to use, such as `tokenizer`, `gemma4`, or `dsml`
 - `output_parser`
-  - output parser to use, such as `generic`, `gemma4`, `gpt_oss`, or `deepseek_v32`
+  - output parser to use, such as `generic`, `gemma4`, `gpt_oss`, `deepseek_v32`, or `muse_glimmer` (the `to=self` / `to=user` / `to=<tool>` channel grammar)
 - `metal_fast_synch`
   - per-model override for the MLX `MLX_METAL_FAST_SYNCH` flag; set to `false` for models that deadlock under FAST_SYNCH on the ring backend
 - `mtp_heads`

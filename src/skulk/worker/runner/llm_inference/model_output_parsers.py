@@ -1,7 +1,7 @@
 import json
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from functools import cache
-from typing import Any
+from typing import Any, cast
 
 from mlx_lm.models.deepseek_v32 import Model as DeepseekV32Model
 from mlx_lm.models.gpt_oss import Model as GptOssModel
@@ -16,7 +16,10 @@ from openai_harmony import (  # pyright: ignore[reportMissingTypeStubs]
 
 from skulk.api.types import ToolCallItem
 from skulk.shared.constants import preferred_env_value
-from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.capabilities import (
+    resolve_model_capability_profile,
+    uses_muse_glimmer_protocol,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     OutputParserType,
@@ -33,8 +36,15 @@ from skulk.worker.engines.mlx.utils_mlx import (
     detect_thinking_prompt_suffix,
 )
 from skulk.worker.runner.bootstrap import logger
+from skulk.worker.runner.llm_inference.muse_glimmer_text_parser import (
+    CONTROL_MARKERS,
+    MuseGlimmerTextParser,
+    TextEmission,
+    ToolCallEmission,
+)
 from skulk.worker.runner.llm_inference.tool_parsers import (
     ToolParser,
+    coerce_tool_calls_to_schema,
     declared_tool_calls,
     find_close_marker,
 )
@@ -113,6 +123,19 @@ def apply_all_parsers(
         model_card=model_card,
         tokenizer=tokenizer,
     )
+
+    if uses_muse_glimmer_protocol(capability_profile):
+        # Muse Glimmer's channels carry reasoning, content, AND tool calls in
+        # one grammar, so a single parser owns the whole split; like gpt-oss
+        # it never passes the marker path, so the offered-tools rule is
+        # applied downstream.
+        mlx_generator = reject_unoffered_tool_calls(
+            parse_muse_glimmer(
+                mlx_generator, _muse_glimmer_marker_ids(tokenizer), tools
+            ),
+            tools,
+        )
+        return _trace_generation_stream("post-all-parsers", model_id, mlx_generator)
 
     if capability_profile.thinking_format == ReasoningFormat.ChannelDelimited:
         mlx_generator = parse_gemma4_thinking_channels(mlx_generator)
@@ -391,6 +414,106 @@ def parse_gpt_oss(
 
         if response.finish_reason is not None:
             yield response
+
+
+def _muse_glimmer_marker_ids(tokenizer: TokenizerWrapper) -> dict[int, str]:
+    """Map Muse Glimmer's control-token ids to their marker text.
+
+    The channel markers are tokenizer special tokens. The streaming
+    detokenizers normally render them as literal text, which is what the
+    parser reads; a detokenizer that drops special tokens would instead hand
+    back an empty delta for the token, so the id map lets the stream be
+    reconstructed either way. Unknown markers (a vocabulary without one) are
+    simply absent.
+    """
+    marker_by_id: dict[int, str] = {}
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if convert is None:
+        return marker_by_id
+    for marker in CONTROL_MARKERS:
+        try:
+            token_id = cast(object, convert(marker))
+        except Exception:  # noqa: BLE001 - a vocabulary probe, best effort
+            continue
+        if isinstance(token_id, int) and token_id >= 0:
+            unknown_id = cast(object, getattr(tokenizer, "unk_token_id", None))
+            if token_id != unknown_id:
+                marker_by_id[token_id] = marker
+    return marker_by_id
+
+
+def parse_muse_glimmer(
+    responses: Generator[ParserChunk],
+    marker_by_id: Mapping[int, str],
+    tools: list[dict[str, Any]] | None = None,
+) -> Generator[ParserChunk]:
+    """Route Muse Glimmer channels into reasoning, content, and tool calls.
+
+    Feeds the detokenized stream through :class:`MuseGlimmerTextParser`: the
+    ``to=self`` channel becomes ``is_thinking`` chunks, ``to=user`` becomes
+    content, and tool-addressed channels are accumulated until the message
+    ends and delivered as ONE :class:`ToolCallResponse` carrying every call.
+    That is the OpenAI shape (one assistant message, one ``tool_calls``
+    array) and it is what keeps parallel calls alive: the API stream stops at
+    the first terminal chunk, so a response per channel would deliver the
+    first call and drop the rest. Control markers never reach the caller.
+    ``marker_by_id`` (see :func:`_muse_glimmer_marker_ids`) reconstructs a
+    control marker whose delta arrived empty. Argument values are retyped
+    against the offered ``tools`` schemas (the ATEM reader keeps scalars as
+    strings by design), the same coercion the text dialect path applies.
+    """
+    parser = MuseGlimmerTextParser()
+    # Held until the message ends so several tool channels arrive together.
+    pending_calls: list[ToolCallItem] = []
+
+    def _deliver(
+        template: GenerationResponse, emissions: list[TextEmission | ToolCallEmission]
+    ) -> Generator[ParserChunk]:
+        for emission in emissions:
+            if isinstance(emission, ToolCallEmission):
+                pending_calls.extend(
+                    coerce_tool_calls_to_schema(emission.calls, tools)
+                    if tools
+                    else emission.calls
+                )
+                continue
+            if emission.text:
+                yield template.model_copy(
+                    update={
+                        "text": emission.text,
+                        "is_thinking": emission.is_thinking,
+                        "finish_reason": None,
+                    }
+                )
+
+    for response in responses:
+        if response is None:
+            yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
+            continue
+        text = response.text
+        if not text and response.token in marker_by_id:
+            text = marker_by_id[response.token]
+        yield from _deliver(response, parser.feed(text))
+        if response.finish_reason is not None:
+            yield from _deliver(response, parser.flush())
+            if pending_calls:
+                yield ToolCallResponse(
+                    tool_calls=list(pending_calls),
+                    usage=response.usage,
+                    stats=response.stats,
+                )
+                pending_calls.clear()
+            # Always emit a terminal chunk so SSE clients close cleanly.
+            yield response.model_copy(
+                update={
+                    "text": "",
+                    "is_thinking": False,
+                    "finish_reason": response.finish_reason,
+                }
+            )
 
 
 def parse_deepseek_v32(
