@@ -9,7 +9,10 @@ from skulk.shared.types.text_generation import (
     InputMessage,
     TextGenerationTaskParams,
 )
-from skulk.worker.runner.llama_server.runner import reasoning_request_overrides
+from skulk.worker.runner.llama_server.runner import (
+    model_declares_reasoning,
+    reasoning_request_overrides,
+)
 
 
 def _params(**kwargs: object) -> TextGenerationTaskParams:
@@ -102,3 +105,15 @@ def test_other_families_keep_generic_levers_with_a_card() -> None:
         "chat_template_kwargs": {"enable_thinking": False},
         "reasoning_effort": "low",
     }
+
+
+def test_intrinsic_reasoning_family_keeps_the_server_reasoning_format() -> None:
+    # The registry's Muse Glimmer card has no reasoning section and no thinking
+    # capability; the family default still says the model reasons, so the
+    # server must not be launched with --reasoning-format none (observed live:
+    # the to=self channel streamed as content).
+    assert model_declares_reasoning(_muse_card())
+    plain = _muse_card().model_copy(
+        update={"model_id": ModelId("example/plain-model"), "family": "custom"}
+    )
+    assert not model_declares_reasoning(plain)

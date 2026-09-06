@@ -43,6 +43,7 @@ import httpx
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.constants import MAX_OUTPUT_TOKENS
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import ModelCard, OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -383,7 +384,7 @@ def _draft_model_args(
     return []
 
 
-def _model_declares_reasoning(card: Any) -> bool:
+def model_declares_reasoning(card: Any) -> bool:
     """Whether the card advertises a reasoning/thinking capability.
 
     Drives ``--reasoning-format``: a reasoning model keeps llama-server's default
@@ -393,11 +394,29 @@ def _model_declares_reasoning(card: Any) -> bool:
     Without that, llama-server's ``auto`` can extract a plain model's prose into
     ``reasoning_content`` (observed with Gemma 4 served via ``--jinja``), leaving
     ``message.content`` empty for the client. Detection mirrors the capability
-    spine: an explicit ``reasoning`` card section or a ``thinking`` capability.
+    spine: an explicit ``reasoning`` card section, a ``thinking`` capability,
+    or a resolved profile whose family reasons intrinsically.
     """
     if getattr(card, "reasoning", None) is not None:
         return True
-    return "thinking" in (getattr(card, "capabilities", None) or [])
+    if "thinking" in (getattr(card, "capabilities", None) or []):
+        return True
+    # Families whose reasoning is intrinsic resolve it through the capability
+    # profile even when the card carries no reasoning section (the signed
+    # registry's Muse Glimmer card, compiled with no tooling/runtime/reasoning
+    # facts). Reading only the raw card here launched such a model with
+    # --reasoning-format none, so its to=self channel streamed as content.
+    if not isinstance(card, ModelCard):
+        return False
+    try:
+        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    except Exception as exc:  # noqa: BLE001 - an unreadable card just means no reasoning
+        logger.opt(exception=exc).warning(
+            f"capability resolution failed for {card.model_id}; "
+            "serving without a reasoning format"
+        )
+        return False
+    return profile.supports_thinking
 
 
 def reasoning_request_overrides(
@@ -785,7 +804,7 @@ class Runner(ServedConcurrentDispatch):
             and card.runtime.output_parser == OutputParserType.Gemma4
         )
         reasoning_format_none = self._uses_channel_parser or not (
-            _model_declares_reasoning(card)
+            model_declares_reasoning(card)
         )
         n_ctx = self._serving_context_tokens
         try:
