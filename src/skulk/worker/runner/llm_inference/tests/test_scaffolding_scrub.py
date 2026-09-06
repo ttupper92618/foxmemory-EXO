@@ -22,11 +22,18 @@ from skulk.worker.runner.llm_inference.scaffolding_scrub import (
 )
 
 GEMMA_LEAK = '<|tool_call>_call:get_weather{location: "Denver"}<tool_call|>'
+ATEM_LEAK = (
+    '<atem:function_calls>\n<atem:invoke name="get_weather">\n'
+    '<atem:parameter name="city">Denver</atem:parameter>\n'
+    "</atem:invoke>\n</atem:function_calls>"
+)
 
 MESSAGES: list[str] = [
     "The weather is fine.",
     GEMMA_LEAK,
     f"I'll check. {GEMMA_LEAK} Done.",
+    ATEM_LEAK,
+    f"Checking. {ATEM_LEAK} Done.",
     '<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>',
     "<|python_tag|>print('hello')",
     '[TOOL_CALLS] [{"name": "get_weather"}]',

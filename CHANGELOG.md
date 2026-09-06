@@ -7,6 +7,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Muse Glimmer (Meta, August 2026) is a first-class model family on every
+  serving lane. The capability resolver now derives the family's wire
+  contract from the card family or model id, the same way it does for
+  Gemma 4 and gpt-oss, so a registry or auto-imported card with no explicit
+  tooling or runtime sections resolves to always-on channel-delimited
+  reasoning (no toggle, default strength high), ATEM tool calling, and the
+  new `muse_glimmer` output parser. The MLX engine gains a streaming parser
+  for the `to=self` / `to=user` / `to=<tool>` channels and Meta's ATEM
+  markup, the shared text dialect reader and the no-tools scaffolding scrub
+  learn ATEM, and every engine's request path translates `reasoning_effort`
+  onto the template's `reasoning_strength` kwarg (`none`/`minimal` become
+  `low`; `xhigh` is honored). Model cards gain `runtime.vllm_reasoning_parser`
+  (explicit only, like the tool-call parser), mapped to vLLM's
+  `--reasoning-parser` so a card can pin `muse_glimmer` for both. The
+  in-process llama.cpp engine is not enabled for this family: the pinned
+  llama-cpp-python binding vendors a llama.cpp build that predates the
+  architecture.
+
 ### Fixed
 
 - `enable_thinking` is honored on the in-process llama.cpp engine for text

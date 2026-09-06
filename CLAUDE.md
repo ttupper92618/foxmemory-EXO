@@ -201,7 +201,13 @@ A model card's `placement.compatible_backends` selects which engine serves it
   (generic `<tool_call>`, Llama's unmarked form, gemma4, and Mistral
   `[TOOL_CALLS]`, which replaces mlx-lm's preinstalled family parser and falls
   back to it for the upstream call form; ids are digest-normalized to
-  Mistral's nine-alphanumeric template requirement at render time). Single-node
+  Mistral's nine-alphanumeric template requirement at render time). Muse
+  Glimmer resolves by family default (always-on channel reasoning, ATEM
+  tools, `reasoning_effort` mapped to the template's `reasoning_strength`)
+  and owns one streaming channel/ATEM parser on this engine; the served
+  engines parse it natively, vLLM through the card-pinned
+  `vllm_reasoning_parser`/`vllm_tool_call_parser` pair, and the in-process
+  llama.cpp binding predates the architecture. Single-node
   bundled vision models load through their native `mlx-vlm` family implementation
   so processor-specific image grids and multimodal positional encoding are
   preserved without routing supported native processors through PyTorch or

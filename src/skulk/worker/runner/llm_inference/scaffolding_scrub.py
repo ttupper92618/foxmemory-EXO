@@ -48,6 +48,15 @@ SCAFFOLDING_MARKERS: Final[tuple[str, ...]] = (
     "<tool_call|>",
     "<|tool_response>",
     "<tool_response|>",
+    # Muse Glimmer ATEM markup (`<atem:function_calls>` blocks). The invoke
+    # and parameter OPENING tags carry a name attribute, so like DSML the
+    # namespace prefix is stripped on its own and the attribute debris is the
+    # accepted trade for a bounded fixed-string vocabulary.
+    "<atem:function_calls>",
+    "</atem:function_calls>",
+    "</atem:invoke>",
+    "</atem:parameter>",
+    "<atem:",
     # DeepSeek V3/R1 block containers (the pre-DSML wire format).
     "<｜tool▁calls▁begin｜>",
     "<｜tool▁calls▁end｜>",

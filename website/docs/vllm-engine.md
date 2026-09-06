@@ -44,6 +44,16 @@ boundaries are enforced loudly rather than degraded silently:
   reject tool requests with a clear error rather than silently dropping
   them; there is no family-default fallback, because one model family can
   span generations with different tool wire formats.
+- **Reasoning is split on parser-pinned cards.** vLLM only separates
+  `reasoning_content` from `content` when the server is launched with a
+  reasoning parser, so a card pins `vllm_reasoning_parser` in its
+  `[runtime]` section (a Muse Glimmer card pins `muse_glimmer` for both
+  parsers) and the runner passes it as `--reasoning-parser`. Explicit only,
+  no family fallback, for the same reason as the tool-call parser. An
+  unpinned reasoning model streams its thinking inline. Muse Glimmer's
+  always-on reasoning is steered through the template's
+  `reasoning_strength` kwarg, which the runner derives from the request's
+  `reasoning_effort`.
 - **Per-token logprobs are rejected** with a clear error: the OpenAI SSE proxy
   does not surface them, and Skulk refuses to silently omit what you asked
   for.

@@ -1220,6 +1220,7 @@ class OutputParserType(str, Enum):
     Gemma4 = "gemma4"
     GptOss = "gpt_oss"
     DeepseekV32 = "deepseek_v32"
+    MuseGlimmer = "muse_glimmer"
 
 
 class ToolCallFormat(str, Enum):
@@ -1229,6 +1230,7 @@ class ToolCallFormat(str, Enum):
     Gemma4 = "gemma4"
     GptOss = "gpt_oss"
     Dsml = "dsml"
+    Atem = "atem"
 
 
 class BuiltinToolType(str, Enum):
@@ -1743,6 +1745,17 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     support (tool requests are rejected loudly). Names follow vLLM's
     parser registry (hermes, llama3_json, mistral, pythonic, deepseek_v3,
     openai, ...); pin only pod-validated names."""
+    vllm_reasoning_parser: str | None = None
+    """vLLM server-side reasoning parser name for this model
+    (``--reasoning-parser``).
+
+    Same doctrine as ``vllm_tool_call_parser``: an engine-specific platform
+    knob, explicit only, no family fallback. Without it vLLM streams a
+    reasoning model's thinking inline with its answer (the server only splits
+    ``reasoning_content`` when a parser is configured), so a card whose model
+    always reasons (Muse Glimmer's ``to=self`` channel) must pin the parser
+    that vLLM registers for the family (``muse_glimmer``, ``qwen3``,
+    ``deepseek_r1``, ``openai_gptoss``, ...). Pin only pod-validated names."""
 
     @model_validator(mode="after")
     def _validate_vllm_spec_pairing(self) -> "RuntimeCapabilityCardConfig":

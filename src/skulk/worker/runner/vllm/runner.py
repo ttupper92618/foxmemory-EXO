@@ -108,6 +108,9 @@ from skulk.worker.runner.llama_cpp.runner import (
     tool_calls_from_message,
     wants_logprobs,
 )
+from skulk.worker.runner.llm_inference.reasoning_controls import (
+    muse_glimmer_strength_kwargs,
+)
 from skulk.worker.runner.llm_inference.scaffolding_scrub import (
     StreamingScaffoldingScrub,
 )
@@ -243,6 +246,7 @@ def build_vllm_serve_args(
     spec_draft_repo: str | None = None,
     spec_draft_revision: str | None = None,
     tool_call_parser: str | None = None,
+    reasoning_parser: str | None = None,
 ) -> list[str]:
     """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
 
@@ -285,6 +289,12 @@ def build_vllm_serve_args(
         args.extend(
             ["--enable-auto-tool-choice", "--tool-call-parser", tool_call_parser]
         )
+    if reasoning_parser is not None:
+        # Card-pinned reasoning parser (runtime.vllm_reasoning_parser): vLLM
+        # only splits reasoning_content from content when one is configured;
+        # without it a reasoning model's thinking streams inline as answer
+        # text. Explicit only, like the tool parser.
+        args.extend(["--reasoning-parser", reasoning_parser])
     if spec_method is not None:
         # Card-declared speculative decoding (runtime.vllm_spec_method /
         # vllm_spec_num_tokens / vllm_spec_draft_repo): method "mtp" engages
@@ -348,6 +358,20 @@ def tool_call_finish_surfaces(raw_finish: object) -> bool:
     return raw_finish in (None, "stop", "tool_calls")
 
 
+def resolve_vllm_reasoning_parser(card: ModelCard) -> str | None:
+    """The vLLM ``--reasoning-parser`` name a card pins, or ``None``.
+
+    Explicit ``runtime.vllm_reasoning_parser`` only, the same doctrine as
+    :func:`resolve_vllm_tool_call_parser`: there is no family fallback, so an
+    unpinned card launches without a reasoning parser and its thinking, if
+    any, arrives inline.
+    """
+    runtime = card.runtime
+    if runtime is not None and runtime.vllm_reasoning_parser is not None:
+        return runtime.vllm_reasoning_parser
+    return None
+
+
 def resolve_vllm_tool_call_parser(card: ModelCard) -> str | None:
     """The vLLM tool parser this card should launch with, or None.
 
@@ -396,7 +420,9 @@ def vllm_generation_kwargs(task_params: Any) -> dict[str, Any]:
     return kwargs
 
 
-def vllm_reasoning_overrides(task_params: Any) -> dict[str, Any]:
+def vllm_reasoning_overrides(
+    task_params: Any, card: ModelCard | None = None
+) -> dict[str, Any]:
     """Map Skulk's thinking controls onto vLLM request fields.
 
     vLLM's OpenAI server exposes the same two levers as llama-server:
@@ -406,13 +432,19 @@ def vllm_reasoning_overrides(task_params: Any) -> dict[str, Any]:
     body carries no thinking control, so ``enable_thinking=False`` would be silently
     ignored and a reasoning model would think on every request. ``"none"`` effort is
     not a valid server value (disabling goes through ``enable_thinking=False``), so
-    it is dropped.
+    it is dropped. A Muse Glimmer card (resolved from ``card``) reads neither
+    lever: its template takes a ``reasoning_strength`` kwarg, which the effort
+    is translated onto instead.
     """
     overrides: dict[str, Any] = {}
+    effort = getattr(task_params, "reasoning_effort", None)
+    strength_kwargs = muse_glimmer_strength_kwargs(card, effort)
+    if strength_kwargs:
+        overrides["chat_template_kwargs"] = strength_kwargs
+        return overrides
     enable_thinking = getattr(task_params, "enable_thinking", None)
     if enable_thinking is not None:
         overrides["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
-    effort = getattr(task_params, "reasoning_effort", None)
     if effort is not None and effort != "none":
         overrides["reasoning_effort"] = effort
     return overrides
@@ -752,6 +784,9 @@ class Runner(ServedConcurrentDispatch):
                 else None
             ),
             tool_call_parser=self._tool_call_parser,
+            reasoning_parser=resolve_vllm_reasoning_parser(
+                self.shard_metadata.model_card
+            ),
         )
         # Deterministic log path keyed by runner_id (matching llama_server), so
         # postmortem debugging is easy and restarts truncate rather than pile up
@@ -902,7 +937,9 @@ class Runner(ServedConcurrentDispatch):
         # Forward thinking control (enable_thinking / reasoning_effort) to vLLM;
         # without it a reasoning model thinks on every request regardless of the
         # request's toggle.
-        body.update(vllm_reasoning_overrides(task.task_params))
+        body.update(
+            vllm_reasoning_overrides(task.task_params, self.shard_metadata.model_card)
+        )
 
         record_runner_phase(
             "task_submission",

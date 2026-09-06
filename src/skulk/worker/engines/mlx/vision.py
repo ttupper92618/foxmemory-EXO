@@ -60,6 +60,7 @@ else:
 
 from skulk.download.download_utils import build_model_path
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
+from skulk.shared.models.capabilities import muse_glimmer_reasoning_strength
 from skulk.shared.models.model_cards import VisionCardConfig
 from skulk.shared.tracing import TraceAttrValue
 from skulk.shared.types.common import ModelId
@@ -614,6 +615,12 @@ def _diagnostic_attrs(attrs: dict[str, TraceAttrValue]) -> dict[str, object]:
     return cast(dict[str, object], attrs)
 
 
+
+#: ``vision.model_type`` spellings the registry and cards use for Muse Glimmer.
+MUSE_GLIMMER_VISION_MODEL_TYPES: frozenset[str] = frozenset(
+    {"muse_glimmer", "muse-glimmer"}
+)
+
 def _build_vision_prompt_with_debug(
     tokenizer: TokenizerWrapper,
     chat_template_messages: list[JsonDict],
@@ -650,6 +657,11 @@ def _build_vision_prompt_with_debug(
             extra_kwargs["thinking"] = enable_thinking
         if reasoning_effort is not None:
             extra_kwargs["reasoning_effort"] = reasoning_effort
+            if model_type in MUSE_GLIMMER_VISION_MODEL_TYPES:
+                # Muse Glimmer's template reads a strength level, not effort.
+                strength = muse_glimmer_reasoning_strength(reasoning_effort)
+                if strength is not None:
+                    extra_kwargs["reasoning_strength"] = strength
         prompt = tokenizer.apply_chat_template(
             chat_template_messages,
             tokenize=False,

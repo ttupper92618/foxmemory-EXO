@@ -31,7 +31,10 @@ from mlx_lm.models.deepseek_v3 import DeepseekV3Model
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from skulk.shared.constants import preferred_env_value
-from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.capabilities import (
+    muse_glimmer_template_kwargs,
+    resolve_model_capability_profile,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -1699,6 +1702,11 @@ def apply_chat_template(
         extra_kwargs["thinking"] = task_params.enable_thinking
     if task_params.reasoning_effort is not None:
         extra_kwargs["reasoning_effort"] = task_params.reasoning_effort
+    # Muse Glimmer steers its always-on reasoning with a strength level rather
+    # than a toggle or the harmony effort field.
+    extra_kwargs.update(
+        muse_glimmer_template_kwargs(capability_profile, task_params.reasoning_effort)
+    )
 
     patched_template: str | None = None
     if task_params.tools:

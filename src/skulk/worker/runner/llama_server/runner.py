@@ -43,7 +43,7 @@ import httpx
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.constants import MAX_OUTPUT_TOKENS
-from skulk.shared.models.model_cards import OutputParserType
+from skulk.shared.models.model_cards import ModelCard, OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -91,6 +91,9 @@ from skulk.worker.runner.llama_cpp.runner import (
 )
 from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
+)
+from skulk.worker.runner.llm_inference.reasoning_controls import (
+    muse_glimmer_strength_kwargs,
 )
 from skulk.worker.runner.llm_inference.scaffolding_scrub import (
     StreamingScaffoldingScrub,
@@ -397,7 +400,9 @@ def _model_declares_reasoning(card: Any) -> bool:
     return "thinking" in (getattr(card, "capabilities", None) or [])
 
 
-def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
+def reasoning_request_overrides(
+    task_params: Any, card: ModelCard | None = None
+) -> dict[str, Any]:
     """Map Skulk's thinking controls onto llama-server request fields.
 
     ``generation_kwargs`` carries sampling params but NOT thinking control, so
@@ -414,15 +419,23 @@ def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
     - ``reasoning_effort`` -> OpenAI-style effort for harmony models (gpt-oss).
       ``"none"`` is not a valid server value; disabling is expressed via
       ``enable_thinking=False`` instead, so it is dropped here.
+    - Muse Glimmer (resolved from ``card``) reads neither: its template steers
+      always-on reasoning with a ``reasoning_strength`` template kwarg, so the
+      effort is translated onto that and the other two levers are omitted.
     """
     overrides: dict[str, Any] = {}
+    effort = getattr(task_params, "reasoning_effort", None)
+    strength_kwargs = muse_glimmer_strength_kwargs(card, effort)
+    if strength_kwargs:
+        overrides["chat_template_kwargs"] = strength_kwargs
+        return overrides
     enable_thinking = getattr(task_params, "enable_thinking", None)
     if enable_thinking is not None:
         overrides["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
-    effort = getattr(task_params, "reasoning_effort", None)
     if effort is not None and effort != "none":
         overrides["reasoning_effort"] = effort
     return overrides
+
 
 
 # How long to wait for the server to finish loading the model and report healthy.
@@ -1159,7 +1172,11 @@ class Runner(ServedConcurrentDispatch):
         # Forward thinking-control (enable_thinking / reasoning_effort) to
         # llama-server. Without this a reasoning model thinks on every request and
         # can return empty content under a bounded budget (#428/#420).
-        body.update(reasoning_request_overrides(task.task_params))
+        body.update(
+            reasoning_request_overrides(
+                task.task_params, self.shard_metadata.model_card
+            )
+        )
         # Tool definitions change the rendered prompt, so include them before the
         # exact token-count request. _generate_with_tools sets the same fields
         # again before the real completion for local clarity.
