@@ -162,6 +162,19 @@ def uses_muse_glimmer_protocol(profile: ResolvedCapabilityProfile) -> bool:
     return profile.output_parser == OutputParserType.MuseGlimmer
 
 
+def family_predates_in_process_llama_cpp(profile: ResolvedCapabilityProfile) -> bool:
+    """Whether the profile's family postdates the in-process llama.cpp binding.
+
+    The platform gate in ``shared/backends.py`` subtracts the in-process
+    ``llama_cpp`` engine for these families; today that is Muse Glimmer alone
+    (upstream support 2026-08-10, after the build llama-cpp-python 0.3.30
+    vendors). Keyed on the resolved contract rather than a card field so the
+    signed registry's cards, which carry no engine gaps by design, are gated
+    the same way as bundled and custom ones.
+    """
+    return uses_muse_glimmer_protocol(profile)
+
+
 #: Muse Glimmer's ``reasoning_strength`` template levels, in ascending order.
 MuseGlimmerReasoningStrength = Literal["low", "medium", "high", "xhigh"]
 

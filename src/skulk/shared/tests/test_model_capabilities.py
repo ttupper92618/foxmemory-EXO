@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from skulk.shared.models.capabilities import (
     ResolvedCapabilityProfile,
+    family_predates_in_process_llama_cpp,
     muse_glimmer_template_kwargs,
     resolve_model_capability_profile,
     uses_muse_glimmer_protocol,
@@ -1044,3 +1045,13 @@ def test_runtime_card_accepts_vllm_reasoning_parser() -> None:
         vllm_reasoning_parser="muse_glimmer",
     )
     assert runtime.vllm_reasoning_parser == "muse_glimmer"
+
+
+def test_muse_glimmer_predates_the_in_process_llama_cpp_binding() -> None:
+    card = _muse_card("unsloth/Muse-Glimmer-30B-GGUF")
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert family_predates_in_process_llama_cpp(profile)
+    generic = resolve_model_capability_profile(
+        ModelId("example/other"), model_card=_base_model_card("example/other")
+    )
+    assert not family_predates_in_process_llama_cpp(generic)

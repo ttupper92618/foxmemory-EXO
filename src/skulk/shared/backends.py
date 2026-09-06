@@ -220,6 +220,18 @@ _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
 )
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 
+# Engines whose runner binding cannot LOAD a family the served sibling serves
+# fine. The in-process ``llama_cpp`` engine runs whatever llama.cpp build the
+# pinned llama-cpp-python binding vendors, and that build trails the served
+# engine's pin by months; a family that landed upstream in between (Muse
+# Glimmer, merged 2026-08-10, first shipped in b10353, while llama-cpp-python
+# 0.3.30 vendors a 2026-06-16 build) loads through ``llama_server`` only. The
+# call sites resolve the family from the capability profile, so registry,
+# bundled, and custom cards all hit the same gate; the table of affected
+# families is the resolver's, this is the platform consequence. Drop the gate
+# for a family once the binding advances past its first supporting build.
+_FAMILY_GATED_ENGINES: Final[frozenset[EngineType]] = frozenset({"llama_cpp"})
+
 
 def platform_compatible_backends(
     compatible_backends: frozenset[str],
@@ -229,6 +241,7 @@ def platform_compatible_backends(
     card_has_pinned_projector: bool = False,
     card_supports_tool_calling: bool = False,
     card_vllm_tool_call_parser: str | None = None,
+    card_family_predates_in_process_binding: bool = False,
 ) -> frozenset[str]:
     """Filter a card's declared backends down to what this platform can serve.
 
@@ -252,6 +265,10 @@ def platform_compatible_backends(
         card_vllm_tool_call_parser: exact vLLM parser pinned by the card. vLLM
             tool requests fail closed when this is absent, so those cards are
             not platform-compatible with vLLM for resident tool use.
+        card_family_predates_in_process_binding: whether the card resolves to
+            a family the in-process llama.cpp binding cannot load yet (see
+            ``_FAMILY_GATED_ENGINES``); those cards keep only their served
+            llama.cpp backends.
 
     Returns:
         The subset of tags whose engine can serve everything the card declares.
@@ -276,6 +293,10 @@ def platform_compatible_backends(
         )
     if card_supports_tool_calling and card_vllm_tool_call_parser is None:
         filtered = frozenset(tag for tag in filtered if engine_of(tag) != "vllm")
+    if card_family_predates_in_process_binding:
+        filtered = frozenset(
+            tag for tag in filtered if engine_of(tag) not in _FAMILY_GATED_ENGINES
+        )
     return filtered
 
 

@@ -25,7 +25,9 @@ This project records release notes here and mirrors public-facing notes in
   `--reasoning-parser` so a card can pin `muse_glimmer` for both. The
   in-process llama.cpp engine is not enabled for this family: the pinned
   llama-cpp-python binding vendors a llama.cpp build that predates the
-  architecture.
+  architecture, so placement and the worker's engine resolution subtract
+  that engine in code (platform truth, keyed on the resolved family) and a
+  registry card listing every llama.cpp lane lands on `llama_server` only.
 
 ### Fixed
 
