@@ -44,6 +44,7 @@ from skulk.worker.runner.llm_inference.muse_glimmer_text_parser import (
 )
 from skulk.worker.runner.llm_inference.tool_parsers import (
     ToolParser,
+    coerce_tool_calls_to_schema,
     declared_tool_calls,
     find_close_marker,
 )
@@ -129,7 +130,9 @@ def apply_all_parsers(
         # it never passes the marker path, so the offered-tools rule is
         # applied downstream.
         mlx_generator = reject_unoffered_tool_calls(
-            parse_muse_glimmer(mlx_generator, _muse_glimmer_marker_ids(tokenizer)),
+            parse_muse_glimmer(
+                mlx_generator, _muse_glimmer_marker_ids(tokenizer), tools
+            ),
             tools,
         )
         return _trace_generation_stream("post-all-parsers", model_id, mlx_generator)
@@ -442,6 +445,7 @@ def _muse_glimmer_marker_ids(tokenizer: TokenizerWrapper) -> dict[int, str]:
 def parse_muse_glimmer(
     responses: Generator[ParserChunk],
     marker_by_id: Mapping[int, str],
+    tools: list[dict[str, Any]] | None = None,
 ) -> Generator[ParserChunk]:
     """Route Muse Glimmer channels into reasoning, content, and tool calls.
 
@@ -453,7 +457,9 @@ def parse_muse_glimmer(
     at the first terminal chunk, so calls are emitted as they close and the
     terminal chunk follows them). Control markers never reach the caller.
     ``marker_by_id`` (see :func:`_muse_glimmer_marker_ids`) reconstructs a
-    control marker whose delta arrived empty.
+    control marker whose delta arrived empty. Argument values are retyped
+    against the offered ``tools`` schemas (the ATEM reader keeps scalars as
+    strings by design), the same coercion the text dialect path applies.
     """
     parser = MuseGlimmerTextParser()
 
@@ -462,8 +468,13 @@ def parse_muse_glimmer(
     ) -> Generator[ParserChunk]:
         for emission in emissions:
             if isinstance(emission, ToolCallEmission):
+                calls = (
+                    coerce_tool_calls_to_schema(emission.calls, tools)
+                    if tools
+                    else emission.calls
+                )
                 yield ToolCallResponse(
-                    tool_calls=emission.calls,
+                    tool_calls=calls,
                     usage=template.usage,
                     stats=template.stats,
                 )

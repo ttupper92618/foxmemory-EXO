@@ -36,9 +36,11 @@ def _chunks(pieces: list[tuple[str, int]]) -> Generator[ParserChunk]:
 
 
 def _run(
-    pieces: list[tuple[str, int]], marker_by_id: dict[int, str] | None = None
+    pieces: list[tuple[str, int]],
+    marker_by_id: dict[int, str] | None = None,
+    tools: list[dict[str, object]] | None = None,
 ) -> list[ParserChunk]:
-    return list(parse_muse_glimmer(_chunks(pieces), marker_by_id or {}))
+    return list(parse_muse_glimmer(_chunks(pieces), marker_by_id or {}, tools))
 
 
 def _texts(chunks: list[ParserChunk], *, thinking: bool) -> str:
@@ -95,3 +97,36 @@ def test_terminal_chunk_always_closes_the_stream() -> None:
     chunks = _run([(" to=user<|message|>Hi", 1)])
     assert _texts(chunks, thinking=False) == "Hi"
     assert _last(chunks).finish_reason == "stop"
+
+
+def test_arguments_are_retyped_against_the_offered_schema() -> None:
+    # The ATEM reader keeps scalars as strings; the offered tool's schema says
+    # count is an integer, so the MLX path must coerce like the text path does.
+    call = (
+        "<|start|>assistant to=repeat<|message|><atem:function_calls>\n"
+        '<atem:invoke name="repeat">\n'
+        '<atem:parameter name="count">3</atem:parameter>\n'
+        '<atem:parameter name="word">hi</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    tools: list[dict[str, object]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "repeat",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": "integer"},
+                        "word": {"type": "string"},
+                    },
+                },
+            },
+        }
+    ]
+    chunks = _run([(REASONING + call, 1)], tools=tools)
+    assert _calls(chunks) == [[("repeat", {"count": 3, "word": "hi"})]]
+    # Without a schema in hand the value stays as written.
+    assert _calls(_run([(REASONING + call, 1)])) == [
+        [("repeat", {"count": "3", "word": "hi"})]
+    ]

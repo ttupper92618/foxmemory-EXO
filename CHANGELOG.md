@@ -19,8 +19,11 @@ This project records release notes here and mirrors public-facing notes in
   for the `to=self` / `to=user` / `to=<tool>` channels and Meta's ATEM
   markup, the shared text dialect reader and the no-tools scaffolding scrub
   learn ATEM, and every engine's request path translates `reasoning_effort`
-  onto the template's `reasoning_strength` kwarg (`none`/`minimal` become
-  `low`; `xhigh` is honored). Model cards gain `runtime.vllm_reasoning_parser`
+  onto the template's `reasoning_strength` kwarg (`minimal` becomes `low`,
+  `xhigh` is honored; a disable request is ignored as on every no-toggle
+  model, because the template opens the reasoning channel unconditionally,
+  so callers steer with an explicit effort). Model cards gain
+  `runtime.vllm_reasoning_parser`
   (explicit only, like the tool-call parser), mapped to vLLM's
   `--reasoning-parser` so a card can pin `muse_glimmer` for both. The
   in-process llama.cpp engine is not enabled for this family: the pinned

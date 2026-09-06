@@ -1018,6 +1018,11 @@ def test_muse_glimmer_no_toggle_means_thinking_cannot_be_disabled() -> None:
     # explicit strength hint and drops the toggle, as the Phase 2 contract says.
     assert resolve_reasoning_params("low", False, profile) == ("low", None)
     assert resolve_reasoning_params(None, False, profile) == (None, None)
+    # A disable request is ignored on a no-toggle model (the shared adapter
+    # contract): the model cannot stop reasoning, so the template default
+    # applies and callers steer strength with an explicit effort instead.
+    assert resolve_reasoning_params("none", None, profile) == (None, None)
+    assert resolve_reasoning_params("minimal", None, profile) == ("minimal", None)
 
 
 def test_muse_glimmer_template_kwargs_map_effort_to_strength() -> None:
