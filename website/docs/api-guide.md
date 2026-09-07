@@ -1908,6 +1908,12 @@ canonical `modelId` before acknowledging creation. An inconsistent shard card
 returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
 
+Persist the submitted instance identity before sending. HTTP acceptance is not
+download or runner readiness. If the response is lost, reconcile that exact ID
+against `GET /state` and `instanceFailures`; this endpoint does not document a
+client idempotency-key guarantee. See [Controller integration](controller-integration.md)
+for bounded readiness observation and cleanup responsibilities.
+
 ### Inspect one instance
 
 **GET** `/instance/{instance_id}`
