@@ -301,3 +301,72 @@ async def test_scheduled_startup_reconciliation_is_not_reported_idle(
 
     with pytest.raises(StartupDelayObservedError):
         await api._store_reconciliation_loop()
+
+
+@pytest.mark.parametrize("transition", ["startup-delay", "running-pass"])
+@pytest.mark.parametrize(
+    "replacement",
+    ["missing-config", "missing-store", "store-disabled", "scan-disabled"],
+)
+async def test_reconciliation_survives_configuration_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transition: str,
+    replacement: str,
+) -> None:
+    """Configuration withdrawal cannot escape the API lifetime task group."""
+    from skulk.store.config import ReconciliationStoreConfig
+
+    api = object.__new__(api_main.API)
+    api._store_client = cast(
+        "ModelStoreClient", cast(object, SimpleNamespace(local_store_path=tmp_path))
+    )
+    store = ModelStoreConfig(store_host="store-node", store_path=str(tmp_path))
+    api._skulk_config = SkulkConfig(model_store=store)
+    api._reconciliation_status = ReconciliationStatus()
+    passes = 0
+    delays: list[float] = []
+
+    def replace_configuration() -> None:
+        if replacement == "missing-config":
+            api._skulk_config = None
+        elif replacement == "missing-store":
+            api._skulk_config = SkulkConfig()
+        elif replacement == "store-disabled":
+            api._skulk_config = SkulkConfig(
+                model_store=ModelStoreConfig(
+                    store_host="store-node", store_path=str(tmp_path), enabled=False
+                )
+            )
+        else:
+            api._skulk_config = SkulkConfig(
+                model_store=ModelStoreConfig(
+                    store_host="store-node",
+                    store_path=str(tmp_path),
+                    reconciliation=ReconciliationStoreConfig(enabled=False),
+                )
+            )
+
+    async def sleep(delay_seconds: float) -> None:
+        delays.append(delay_seconds)
+        assert len(delays) <= 2, "withdrawn configuration must stop the lifetime loop"
+        if len(delays) == 1 and transition == "startup-delay":
+            replace_configuration()
+
+    async def reconcile(_self: api_main.API) -> ReconciliationStatus:
+        nonlocal passes
+        passes += 1
+        if transition == "running-pass":
+            replace_configuration()
+        return ReconciliationStatus(state="complete")
+
+    monkeypatch.setattr(api_main.anyio, "sleep", sleep)
+    monkeypatch.setattr(api_main.API, "_run_store_reconciliation", reconcile)
+    await api._store_reconciliation_loop()
+    assert passes == (0 if transition == "startup-delay" else 1)
+    assert delays == (
+        [10]
+        if transition == "startup-delay"
+        else [10, store.reconciliation.interval_seconds]
+    )
+    assert api._reconciliation_status.state == "idle"
