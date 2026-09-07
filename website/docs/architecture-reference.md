@@ -70,6 +70,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Role:** picks the cluster master via the bully algorithm
 - **Lives in:** `src/skulk/shared/election.py`
 - **Communicates via:** `ELECTION_MESSAGES` topic
+- **Late proposals:** a better same-round proposal corrects a completed result; comparison uses the completed vote rather than post-win seniority. Duplicate, inferior, and older-round proposals do not reverse the result.
 - **Triggers:** node startup, lost master heartbeat, explicit master abdication
 
 ### API

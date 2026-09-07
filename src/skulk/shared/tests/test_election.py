@@ -621,3 +621,49 @@ async def test_connection_churn_burst_still_converges(
         # Tear down cleanly while churn may still be sending: cancel rather than
         # close the channel out from under the running producer task.
         tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_late_same_round_candidate_corrects_completed_result() -> None:
+    """A peer's delayed vote must converge after our local campaign timeout.
+
+    With asymmetric subscription readiness, one peer can finish its round
+    before another peer even receives the initiating broadcast. Both still
+    exchange messages on the same live connection, so no membership change
+    comes along to repair their conflicting completed results.
+    """
+    outbound, _outbound_receiver = channel[ElectionMessage]()
+    inbound, inbound_receiver = channel[ElectionMessage]()
+    results, result_receiver = channel[ElectionResult]()
+    _connections, connection_receiver = channel[ConnectionMessage]()
+    _commands, command_receiver = channel[ForwarderCommand]()
+    election = Election(
+        node_id=NodeId("B"),
+        election_message_receiver=inbound_receiver,
+        election_message_sender=outbound,
+        election_result_sender=results,
+        connection_message_receiver=connection_receiver,
+        command_receiver=command_receiver,
+    )
+    async with create_task_group() as tasks:
+        tasks.start_soon(election.run)
+        with fail_after(2):
+            initial = await result_receiver.receive()
+            assert initial.won_clock == 0
+            assert initial.session_id.master_node_id == NodeId("B")
+            # The candidate's original vote has equal seniority; our post-win
+            # seniority increment must not rewrite the already completed vote.
+            late = em(clock=0, seniority=0, node_id="Z")
+            await inbound.send(late)
+            corrected = await result_receiver.receive()
+            assert corrected.won_clock == 0
+            assert corrected.session_id == late.proposed_session
+            assert corrected.is_new_master
+            # Duplicate wire copies and losing proposals cannot emit another
+            # correction or move the cluster back to an inferior result.
+            await inbound.send(late)
+            await inbound.send(em(clock=0, seniority=0, node_id="A"))
+            with move_on_after(0.05):
+                unexpected = await result_receiver.receive()
+                pytest.fail(f"unexpected repeated election result: {unexpected}")
+        tasks.cancel_scope.cancel()
