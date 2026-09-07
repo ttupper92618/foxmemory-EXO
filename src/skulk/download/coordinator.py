@@ -303,7 +303,10 @@ class DownloadCoordinator:
         self, callback_shard: ShardMetadata, progress: RepoDownloadProgress
     ) -> None:
         model_id = callback_shard.model_card.model_id
-        if model_id in self._suppressed_progress:
+        if model_id in self._suppressed_progress or model_id not in self.active_downloads:
+            # Nested companion transfers belong to their parent's installation.
+            # Recording them as separate ongoing jobs strands those entries:
+            # only the requested shard has an owned finalization task.
             return
 
         if progress.status == "complete":
@@ -773,7 +776,7 @@ class DownloadCoordinator:
                 path: Path | None = None
                 with cancel_scope:
                     path = await self.shard_downloader.ensure_shard(shard)
-                if path is not None:
+                if path is not None and not cancel_scope.cancel_called:
                     # The returned path and installed identity become visible in
                     # one terminal event, after all installation work succeeds.
                     completed = DownloadCompleted(

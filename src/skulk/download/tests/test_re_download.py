@@ -201,7 +201,9 @@ async def test_incomplete_transfer_cannot_return_an_installed_path(
     assert not (tmp_path / ".skulk" / "installed-card.json").exists()
 
 
-@pytest.mark.parametrize("outcome", ["complete", "failed", "cancelled"])
+@pytest.mark.parametrize(
+    "outcome", ["complete", "failed", "cancelled", "cancelled_return"]
+)
 async def test_transfer_completion_waits_for_installed_identity(
     tmp_path: Path, outcome: str
 ) -> None:
@@ -226,7 +228,13 @@ async def test_transfer_completion_waits_for_installed_identity(
             """Publish signed identity only when the test releases finalization."""
             await super().ensure_shard(shard, config_only)
             transferred.set()
-            await finalize.wait()
+            try:
+                await finalize.wait()
+            except anyio.get_cancelled_exc_class():
+                # Some installers shield finalization and return after their
+                # caller cancels. Their result cannot resurrect cancelled work.
+                if outcome != "cancelled_return":
+                    raise
             if outcome == "failed":
                 raise OSError("installed identity write failed")
             (directory / "model.gguf").write_bytes(b"weights")
@@ -255,11 +263,11 @@ async def test_transfer_completion_waits_for_installed_identity(
             assert not isinstance(coordinator.download_status[MODEL_ID], DownloadCompleted)
             with pytest.raises(anyio.WouldBlock):
                 received_events.receive_nowait()
-            if outcome == "cancelled":
+            if outcome.startswith("cancelled"):
                 coordinator.active_downloads[MODEL_ID].cancel()
             else:
                 finalize.set()
-        if outcome == "cancelled":
+        if outcome.startswith("cancelled"):
             with pytest.raises(anyio.WouldBlock):
                 received_events.receive_nowait()
         else:
@@ -274,6 +282,54 @@ async def test_transfer_completion_waits_for_installed_identity(
                 require_registry_installed_artifact(directory, shard.model_card)
             with pytest.raises(anyio.WouldBlock):
                 received_events.receive_nowait()
+
+
+async def test_nested_companion_progress_cannot_strand_an_unowned_download() -> None:
+    """Incidental transfers cannot block a later explicit companion request."""
+
+    parent = _make_shard()
+    companion = _make_shard(ModelId("test-org/companion"))
+    requested: list[ModelId] = []
+
+    class CompanionDownloader(FakeShardDownloader):
+        """Emit nested companion callbacks while installing the parent."""
+
+        async def ensure_shard(
+            self, shard: ShardMetadata, config_only: bool = False
+        ) -> Path:
+            """Report companion transfer progress without a separate task."""
+            requested.append(shard.model_card.model_id)
+            if shard.model_card.model_id == MODEL_ID:
+                progress = await self.get_shard_download_status_for_shard(companion)
+                progress = progress.model_copy(update={"status": "in_progress"})
+                for callback in self._progress_callbacks:
+                    await callback(companion, progress)
+                await super().ensure_shard(companion, config_only)
+            return await super().ensure_shard(shard, config_only)
+
+    _, commands = channel[ForwarderDownloadCommand]()
+    events, received_events = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    downloader = CompanionDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=commands,
+        event_sender=events,
+        telemetry_sender=telemetry,
+    )
+    with patch.object(
+        coordinator, "_resolve_or_refresh_complete_artifact", new=AsyncMock(return_value=None)
+    ), anyio.fail_after(5):
+        async with coordinator._tg:
+            await coordinator._start_download(parent)
+            assert await _wait_for_download_completed(received_events, MODEL_ID)
+            assert companion.model_card.model_id not in coordinator.download_status
+            await coordinator._start_download(companion)
+            assert await _wait_for_download_completed(
+                received_events, companion.model_card.model_id
+            )
+    assert requested == [MODEL_ID, companion.model_card.model_id]
 
 
 async def test_purge_all_unregisters_only_companion_artifact_alias(
