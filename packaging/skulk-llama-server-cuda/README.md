@@ -21,6 +21,10 @@ The x86_64 wheel carries kernels for the established Ampere-through-Hopper fleet
 
 Version scheme: `0.<llama.cpp build>.<packaging revision>`; `0.10068.0` is the first packaging of upstream `b10068`. Built and published by the `engine-wheel` workflow to Foxlight's package index with build-provenance attestations.
 
+For a CUDA-only packaging revision, dispatch with `publish=true` and
+`publish_variant=cuda`. This publishes both CUDA architectures without replacing
+the unchanged Vulkan version with rebuilt bytes.
+
 How this wheel fits into Skulk's install and provisioning flow is documented in the [Build & Runtime Paths guide](https://foxlight-foundation.github.io/Skulk/build-and-runtime/).
 
 The bundled `llama-server` and `ggml-rpc-server` binaries derive from llama.cpp (MIT); its license text ships in the wheel under `skulk_llama_server_cuda/licenses/`.

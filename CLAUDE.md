@@ -47,6 +47,9 @@ nix fmt
 Managed CUDA engine wheels disable `GGML_NATIVE` to avoid inheriting CI-host CPU
 instructions. The CUDA wheel installs and resolves NVIDIA CUDA, cuBLAS and NCCL
 runtime libraries from their official Python packages.
+For a CUDA-only packaging revision, the engine-wheel workflow's
+`publish_variant=cuda` publishes both CUDA architectures while preserving the
+unchanged Vulkan package.
 
 `uv` is the canonical Skulk runtime path on macOS, including the official
 `mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based
