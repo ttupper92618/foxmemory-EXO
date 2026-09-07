@@ -821,6 +821,18 @@ comment rated 1–3, reply with the severity-based rationale for not changing th
 current PR, note any follow-up when appropriate, and resolve the thread. Time
 spent implementing low-severity feedback is time not spent on real work.
 
+### Worktree Hygiene
+
+Working in a dedicated git worktree is encouraged, but a worktree's life ends
+with its PR. After a PR merges, the agent or developer who created its
+worktree removes it (`git worktree remove <path>`; branches and commits are
+untouched). Do not accumulate merged worktrees: each one carries a
+multi-gigabyte virtualenv and node_modules, and dozens of stale ones have
+exhausted the dev machine's disk before. `scripts/prune_merged_worktrees.sh`
+sweeps safely (only clean worktrees whose HEAD is already an ancestor of
+origin/dev and that have been untouched for 48 hours are removed; pass
+`--dry-run` to preview).
+
 ### PR Review Loop
 
 Foxlight PRs are never opened as drafts. After opening or updating a PR, keep it
