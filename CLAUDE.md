@@ -44,6 +44,10 @@ uv run ruff check
 nix fmt
 ```
 
+Managed CUDA engine wheels disable `GGML_NATIVE` to avoid inheriting CI-host CPU
+instructions. The CUDA wheel installs and resolves NVIDIA CUDA, cuBLAS and NCCL
+runtime libraries from their official Python packages.
+
 `uv` is the canonical Skulk runtime path on macOS, including the official
 `mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based
 validation, and reproducible development shells; it should not silently swap

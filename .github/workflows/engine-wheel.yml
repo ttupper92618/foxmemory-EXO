@@ -123,7 +123,9 @@ jobs:
             # driver-API reference; llama-server commits its KV window up
             # front at a fixed -c, so the VMM pool allocator's benefit is
             # marginal for this serving shape.
-            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_architectures }} -DGGML_CUDA_NO_VMM=ON"
+            # CUDA wheels must not inherit the runner's CPU instruction set:
+            # a native AMX build can SIGILL during model load on a GPU host.
+            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_architectures }} -DGGML_CUDA_NO_VMM=ON -DGGML_NATIVE=OFF"
           else
             BACKEND_FLAGS="-DGGML_VULKAN=ON"
           fi

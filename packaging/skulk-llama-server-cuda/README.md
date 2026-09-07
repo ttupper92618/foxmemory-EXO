@@ -14,6 +14,9 @@ The index flag is required: this wheel is published only to the Foxlight index (
 
 Skulk's engine provisioning discovers the installed wheel automatically and wires it as the node's served engine; no configuration is needed. A machine additionally needs the NVIDIA driver (anything where `nvidia-smi` works), which only NVIDIA can ship.
 
+The CPU backend is built with `GGML_NATIVE=OFF`, so installation does not
+inherit CPU instruction requirements from the CI build host.
+
 The x86_64 wheel carries kernels for the established Ampere-through-Hopper fleet. The aarch64 wheel targets compute capability 12.1 with CUDA 12.9 for Grace Blackwell systems such as GB10. The platform-specific filenames share one package version so ordinary Python package resolution selects the correct payload.
 
 Version scheme: `0.<llama.cpp build>.<packaging revision>`; `0.10068.0` is the first packaging of upstream `b10068`. Built and published by the `engine-wheel` workflow to Foxlight's package index with build-provenance attestations.
