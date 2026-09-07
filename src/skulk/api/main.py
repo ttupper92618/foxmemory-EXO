@@ -303,6 +303,7 @@ from skulk.extensions import (
     snapshot_cluster,
     validate_against_schema,
 )
+from skulk.extensions.steward import StewardToolBinding
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import (
     PlacementError,
@@ -7392,6 +7393,33 @@ class API:
             return call_failure(
                 call.call_id, "unreachable", f"call to {node_id} failed: {exc}"
             )
+
+    async def steward_extension_tools(
+        self, *, proposals_allowed: bool
+    ) -> tuple[StewardToolBinding, ...]:
+        """Return eligible installed adapter tools for one steward model step."""
+        if self._extensions is None:
+            return ()
+        return await self._extensions.steward_tools(
+            self._extension_context, proposals_allowed=proposals_allowed
+        )
+
+    async def invoke_steward_extension_tool(
+        self,
+        binding: StewardToolBinding,
+        arguments: dict[str, object],
+        *,
+        proposals_allowed: bool,
+    ) -> str:
+        """Invoke a read or inert proposal without exposing execution authority."""
+        if self._extensions is None:
+            return '{"error":"extension tool unavailable or refused"}'
+        return await self._extensions.invoke_steward_tool(
+            binding,
+            self._extension_context,
+            arguments,
+            proposals_allowed=proposals_allowed,
+        )
 
     async def _describe_node_capabilities(
         self, node_id: NodeId

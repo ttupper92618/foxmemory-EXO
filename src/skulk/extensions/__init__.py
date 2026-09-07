@@ -34,6 +34,7 @@ from skulk.extensions.speech import (
     TTS_CAPABILITY_DESCRIPTOR,
     BuiltinSpeechProvider,
 )
+from skulk.extensions.steward import StewardTool, StewardToolProvider
 from skulk.extensions.streams import (
     MAX_INLINE_MEDIA_BYTES,
     BlobMediaAttachment,
@@ -85,6 +86,8 @@ from skulk.extensions.vad import (
 from skulk.extensions.validation import validate_against_schema
 
 __all__ = [
+    "StewardTool",
+    "StewardToolProvider",
     "DEFAULT_CALL_TIMEOUT_SECONDS",
     "ENTRY_POINT_GROUP",
     "MAX_CALL_PAYLOAD_BYTES",
