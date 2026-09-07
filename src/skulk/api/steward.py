@@ -35,6 +35,7 @@ from skulk.api.types.api import (
     ToolCallItem,
     Usage,
 )
+from skulk.extensions.steward import StewardToolBinding
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import (
     ErrorChunk,
@@ -196,9 +197,7 @@ STEWARD_PROPOSAL_TOOL_NAMES = frozenset(
 )
 
 
-def steward_tool_definitions(
-    *, include_proposals: bool = True
-) -> list[dict[str, Any]]:
+def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str, Any]]:
     """Return steward read tools and, when authorized, inert proposal tools.
 
     Args:
@@ -618,9 +617,9 @@ class StewardActionProposalView(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True)
 
     proposal_id: str = Field(description="Stable proposal identity.")
-    action: Literal[
-        "place_model", "stop_model", "restart_model", "cancel_download"
-    ] = Field(description="Safe basic-action name awaiting or following a decision.")
+    action: Literal["place_model", "stop_model", "restart_model", "cancel_download"] = (
+        Field(description="Safe basic-action name awaiting or following a decision.")
+    )
     target: str = Field(description="Friendly model or node-and-model target.")
     rationale: str = Field(description="Why the steward recommended the action.")
     evidence: tuple[str, ...] = Field(
@@ -1431,6 +1430,7 @@ class StewardHarness:
     def __init__(self, api: "API", *, proposals_allowed: bool = True) -> None:
         self._api = api
         self._proposals_allowed = proposals_allowed
+        self._extension_tools: tuple[StewardToolBinding, ...] = ()
         # The inner TextGeneration currently in flight for this turn, so an
         # abandoned stream (client disconnect, cancel button) can stop the
         # runner instead of leaving it generating for nobody.
@@ -1550,7 +1550,9 @@ class StewardHarness:
         if len(evidence) > 8:
             raise ValueError("proposal evidence is limited to eight entries")
         if len(rationale.strip()) > 1024 or len(expected_effect.strip()) > 1024:
-            raise ValueError("proposal rationale and expected_effect are limited to 1024 chars")
+            raise ValueError(
+                "proposal rationale and expected_effect are limited to 1024 chars"
+            )
         if any(len(item) > 512 for item in evidence):
             raise ValueError("proposal evidence entries are limited to 512 chars")
         return rationale.strip(), evidence, expected_effect.strip()
@@ -1617,6 +1619,15 @@ class StewardHarness:
 
     async def _execute(self, name: str, arguments: dict[str, object]) -> str:
         api = self._api
+        if name.startswith("extension_"):
+            binding = next(
+                (item for item in self._extension_tools if item.tool.name == name), None
+            )
+            if binding is None:
+                return '{"error":"extension tool was not offered to this turn"}'
+            return await api.invoke_steward_extension_tool(
+                binding, arguments, proposals_allowed=self._proposals_allowed
+            )
         if name in STEWARD_PROPOSAL_TOOL_NAMES and not self._proposals_allowed:
             raise ValueError(
                 "steward proposal creation requires operator mutation authority"
@@ -2093,12 +2104,25 @@ class StewardHarness:
         )
 
         api = self._api
+        self._extension_tools = await api.steward_extension_tools(
+            proposals_allowed=self._proposals_allowed
+        )
+        extension_definitions = [
+            {
+                "type": "function",
+                "function": {
+                    "name": binding.tool.name,
+                    "description": binding.tool.description,
+                    "parameters": binding.tool.input_schema,
+                },
+            }
+            for binding in self._extension_tools
+        ]
         request = ChatCompletionRequest(
             model=model_id,  # type: ignore[arg-type]
             messages=messages,
-            tools=steward_tool_definitions(
-                include_proposals=self._proposals_allowed
-            ),
+            tools=steward_tool_definitions(include_proposals=self._proposals_allowed)
+            + extension_definitions,
             temperature=0.1,
             max_tokens=1024,
             stream=False,

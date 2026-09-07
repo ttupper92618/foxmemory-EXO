@@ -18,6 +18,12 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from skulk.extensions.capabilities import CapabilityDescriptor
+from skulk.extensions.steward import (
+    StewardToolBinding,
+    StewardToolProvider,
+    collect_steward_tools,
+    invoke_steward_tool,
+)
 from skulk.extensions.types import (
     CapabilityCallHandler,
     CapabilityInputStreamHandler,
@@ -233,6 +239,34 @@ class LoadedExtensions:
         """Names of all loaded extensions."""
         return list(self._names)
 
+    async def steward_tools(
+        self, context: ExtensionContext, *, proposals_allowed: bool
+    ) -> tuple[StewardToolBinding, ...]:
+        """Discover bounded tools from loaded adapters while the host is serving."""
+        if self._stopping:
+            return ()
+        return await collect_steward_tools(
+            self._extension_instances, context, proposals_allowed=proposals_allowed
+        )
+
+    async def invoke_steward_tool(
+        self,
+        binding: StewardToolBinding,
+        context: ExtensionContext,
+        arguments: dict[str, object],
+        *,
+        proposals_allowed: bool,
+    ) -> str:
+        """Dispatch only to a still-installed request-local adapter binding."""
+        if self._stopping or not any(
+            isinstance(extension, StewardToolProvider) and extension is binding.provider
+            for extension in self._extension_instances
+        ):
+            return '{"error":"extension tool unavailable or refused"}'
+        return await invoke_steward_tool(
+            binding, context, arguments, proposals_allowed=proposals_allowed
+        )
+
     @property
     def has_chat_middleware(self) -> bool:
         """Whether any loaded extension provides chat middleware."""
@@ -326,7 +360,9 @@ class LoadedExtensions:
             except Exception as error:
                 logger.error(f"Extension shutdown failed: {type(error).__name__}")
 
-        with anyio.move_on_after(_EXTENSION_SHUTDOWN_TIMEOUT_SECONDS, shield=True) as scope:
+        with anyio.move_on_after(
+            _EXTENSION_SHUTDOWN_TIMEOUT_SECONDS, shield=True
+        ) as scope:
             async with anyio.create_task_group() as tasks:
                 for extension in self._extension_instances:
                     if isinstance(extension, SupportsExtensionShutdown):

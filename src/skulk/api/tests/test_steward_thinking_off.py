@@ -16,6 +16,7 @@ from skulk.api.steward import (
     StewardChatMessage,
     StewardHarness,
 )
+from skulk.extensions.steward import StewardToolBinding
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -66,6 +67,12 @@ class _CapturingApi:
     async def running_model_card(self, model_id: ModelId) -> ModelCard:
         assert str(model_id) == _STEWARD_MODEL
         return _thinking_toggle_card()
+
+    async def steward_extension_tools(
+        self, *, proposals_allowed: bool
+    ) -> tuple[StewardToolBinding, ...]:
+        """Keep this reasoning fixture independent of installed adapter tools."""
+        return ()
 
     async def dispatch_text_generation(
         self,

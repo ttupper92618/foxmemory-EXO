@@ -501,6 +501,13 @@ extension never degrades inference), extensions never own the chunk stream,
 and no extension installed = Skulk unchanged. Kill switch:
 `SKULK_EXTENSIONS_DISABLE=1`.
 
+Optional `StewardToolProvider` offers bounded `extension_*` read and inert-proposal
+tools through `extensions/steward.py`. The steward binds each model step to the
+exact adapter and tool revision, filters proposals by caller mutation permission,
+and rechecks eligibility before dispatch. No signing credential or effect approval
+is passed; provider authorization remains mandatory. Hooks have cooperative
+deadlines and sanitized failures and remain trusted installed Python code.
+
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. The installer and supervised launchd/systemd startup wrapper build these assets with Skulk's pinned bundled Node.js runtime, retaining compatible system Node/npm only as a recovery fallback. Only an explicitly headless node (or one with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
 
@@ -950,3 +957,9 @@ resource telemetry, without advertising inference backends.
 The engine manifest also sets `LLAMA_SERVER_CUDA_MIN_REVISION`; both installation
 and runtime selection enforce this packaging floor. Revisit it when advancing the
 engine pin; revision 1 for b10753 excludes the NCCL/CPU portability defects.
+
+The trusted steward extension facet reads the current intelligent-fabric mode and global
+`SKULK_FABRIC_CAPABILITIES_DISABLE` kill switch through `ExtensionContext.steward_actions_allowed`. Proposal
+collection and dispatch recheck it; private approved-action adapters must also
+recheck it on every dispatch or retry. The callback supplies no approval evidence
+or signing authority, and omitted callbacks fail closed.

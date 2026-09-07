@@ -1575,6 +1575,19 @@ The contract is deliberately small (`src/skulk/extensions/`):
   the telemetry-plane and capability surfaces described in the subsections
   below.
 
+### Steward adapter tools
+
+Installed adapters may implement `StewardToolProvider` to offer namespaced
+`extension_*` tools for bounded reads and inert proposals. The steward filters
+proposal tools by the authenticated caller's mutation permission, binds each
+model step to the offered tool revision and adapter, and rechecks eligibility
+before invocation. A changed contract, withdrawal, shutdown, invalid argument or
+ambiguous tool name fails closed. Discovery and invocation have cooperative
+deadlines and payload limits; failures expose only sanitized diagnostics.
+This hook passes no approval credential. An effect provider still requires its
+own operator approval and policy checks; a proposal hook only stores an inert
+request. Installed Python extensions are trusted code, not a process sandbox.
+
 ### Citizenship on the telemetry plane
 
 An extension is not a guest process observing Skulk from outside; the context
@@ -1857,3 +1870,9 @@ rust/                   # Rust crates: networking (libp2p), skulk_pyo3_bindings,
 - [Model Store](model-store): shared model artifact hosting
 
 Maintenance discipline for this doc and the [Architecture Reference](architecture-reference) lives in [AGENTS.md](https://github.com/Foxlight-Foundation/Skulk/blob/main/AGENTS.md). Architectural shape changes (new component, new event, new pubsub topic, new state field, new major API endpoint, new family adapter) update these docs in the same commit as the code.
+
+The trusted steward extension facet reads the current intelligent-fabric mode and global
+`SKULK_FABRIC_CAPABILITIES_DISABLE` kill switch through `ExtensionContext.steward_actions_allowed`. Proposal
+collection and dispatch recheck it; private approved-action adapters must also
+recheck it on every dispatch or retry. The callback supplies no approval evidence
+or signing authority, and omitted callbacks fail closed.
