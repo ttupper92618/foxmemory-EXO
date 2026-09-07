@@ -1232,7 +1232,9 @@ change ships:
 1. Bump `LLAMA_SERVER_PIN` and re-record every artifact sha256 in
    `LLAMA_SERVER_ARTIFACTS` from the new release's asset digests
    (`gh api repos/ggml-org/llama.cpp/releases/tags/<tag>`).
-2. Bump both wheel versions in `packaging/skulk-llama-server-{cuda,vulkan}`
+2. Revisit `LLAMA_SERVER_CUDA_MIN_REVISION` for the new pin and validate its
+   packaging floor; both the installer and runtime reject older CUDA revisions.
+   Bump both wheel versions in `packaging/skulk-llama-server-{cuda,vulkan}`
    (scheme `0.<build>.<rev>`) and the engine workflow pin; the `engine-wheel`
    guard fails if either package, the workflow, the manifest, or the installer's
    derived-version wiring disagrees.

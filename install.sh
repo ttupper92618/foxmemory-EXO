@@ -203,6 +203,9 @@ uv sync
 # of a hardcoded one the runtime would then ignore as a pin mismatch.
 ENGINE_BUILD="$(grep -oE 'LLAMA_SERVER_PIN: Final = "b[0-9]+"' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+' || true)"
 
+# Reject broken packaging revisions even when the engine build itself matches.
+CUDA_MIN_REVISION="$(grep -oE 'LLAMA_SERVER_CUDA_MIN_REVISION: Final = [0-9]+' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+' || true)"
+
 # The Foxlight wheel index is the source of truth for engine wheels (the
 # CUDA wheel exceeds PyPI's per-file limit); wheels carry sigstore build
 # provenance (gh attestation verify <wheel> --owner Foxlight-Foundation).
@@ -219,11 +222,11 @@ FOXLIGHT_WHEEL_INDEX="https://wheels.foxlight.ai/simple/"
 # fallback that supplies the NVIDIA runtime dependencies.
 ENGINE_INDEX_FLAGS=(--extra-index-url "$FOXLIGHT_WHEEL_INDEX" --index-url "https://pypi.org/simple/")
 
-if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
+if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" || -z "$CUDA_MIN_REVISION" ]]; then
     warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
 elif [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
     log "installing the CUDA llama-server engine wheel (engine build b$ENGINE_BUILD)"
-    if ! uv pip install "${ENGINE_INDEX_FLAGS[@]}" "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*"; then
+    if ! uv pip install "${ENGINE_INDEX_FLAGS[@]}" "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*,>=0.${ENGINE_BUILD}.${CUDA_MIN_REVISION}"; then
         warn "the CUDA engine wheel is unavailable (index not yet live, no network, or unsupported platform);"
         warn "trying the Vulkan engine wheel (NVIDIA GPUs run the Vulkan build on bare metal)"
         # Mirrors runtime preference: cuda wheel, then vulkan wheel, then the

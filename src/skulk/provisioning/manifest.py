@@ -42,6 +42,13 @@ The RPC protocol changed in the b10434 window, so ``llama-server`` and every
 re-recording checksums and re-running the fresh-box gauntlet.
 """
 
+LLAMA_SERVER_CUDA_MIN_REVISION: Final = 1
+"""Minimum CUDA packaging revision for the current engine pin.
+
+Revision 1 fixes missing NCCL and build-host CPU instructions. Reset deliberately
+when advancing the engine pin, after validating the new wheel's packaging.
+"""
+
 EngineVariant = Literal["cpu", "vulkan", "rocm", "cuda"]
 """Compute variant of a managed llama-server build.
 

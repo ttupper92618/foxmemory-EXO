@@ -112,6 +112,10 @@ jobs:
           grep -q 'skulk-llama-server-cuda==0.${ENGINE_BUILD}' install.sh
           grep -q 'skulk-llama-server-vulkan==0.${ENGINE_BUILD}' install.sh
           grep -q 'LLAMA_SERVER_PIN' install.sh
+          MIN_REV="$(grep -oE 'LLAMA_SERVER_CUDA_MIN_REVISION: Final = [0-9]+' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+')"
+          PACKAGE_REV="$(sed -n 's/^version = "0\.[0-9]*\.\([0-9]*\)"/\1/p' packaging/skulk-llama-server-cuda/pyproject.toml)"
+          test "$PACKAGE_REV" -ge "$MIN_REV"
+          grep -q 'LLAMA_SERVER_CUDA_MIN_REVISION' install.sh
 
       - name: Build llama-server (${{ matrix.variant }})
         run: |

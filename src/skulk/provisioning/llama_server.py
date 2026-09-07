@@ -36,9 +36,12 @@ from pathlib import Path
 
 import httpx
 from loguru import logger
+from packaging.specifiers import SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from skulk.provisioning.manifest import (
     LLAMA_SERVER_ARTIFACTS,
+    LLAMA_SERVER_CUDA_MIN_REVISION,
     LLAMA_SERVER_PIN,
     EngineArtifact,
     EngineVariant,
@@ -156,13 +159,21 @@ def _wheel_version_matches_pin(distribution: str, *, quiet: bool = False) -> boo
     except PackageNotFoundError:
         return False
     expected_prefix = f"0.{LLAMA_SERVER_PIN.removeprefix('b')}."
-    if installed.startswith(expected_prefix):
+    minimum_revision = (
+        LLAMA_SERVER_CUDA_MIN_REVISION if distribution == "skulk-llama-server-cuda" else 0
+    )
+    constraint = f"=={expected_prefix}*,>={expected_prefix}{minimum_revision}"
+    try:
+        matches = Version(installed) in SpecifierSet(constraint)
+    except InvalidVersion:
+        matches = False
+    if matches:
         return True
     if not quiet:
         logger.warning(
             f"installed {distribution} {installed} does not package the pinned "
-            f"llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel (install "
-            f"{distribution}=={expected_prefix}* to use it)"
+            f"llama.cpp build {LLAMA_SERVER_PIN} at a supported packaging revision; "
+            f"ignoring the wheel (install {distribution}{constraint} to use it)"
         )
     return False
 
@@ -278,7 +289,10 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
         return False
     uv = shutil.which("uv")
     pin = LLAMA_SERVER_PIN.removeprefix("b")
-    specifier = f"skulk-llama-server-cuda==0.{pin}.*"
+    specifier = (
+        f"skulk-llama-server-cuda==0.{pin}.*,"
+        f">=0.{pin}.{LLAMA_SERVER_CUDA_MIN_REVISION}"
+    )
     # The remediation mirrors the automated uv invocation exactly, because
     # the resolution semantics are load-bearing: uv consults extra indexes
     # BEFORE the default index, so the Foxlight wheel wins, while pip's

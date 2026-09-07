@@ -946,3 +946,7 @@ shielded cleanup budget after discovery withdrawal. CapabilityReadiness is an
 optional cached predicate covering discovery and new unary/stream admission.
 Management-only API nodes gossip capability tags and empty withdrawals alongside
 resource telemetry, without advertising inference backends.
+
+The engine manifest also sets `LLAMA_SERVER_CUDA_MIN_REVISION`; both installation
+and runtime selection enforce this packaging floor. Revisit it when advancing the
+engine pin; revision 1 for b10753 excludes the NCCL/CPU portability defects.
