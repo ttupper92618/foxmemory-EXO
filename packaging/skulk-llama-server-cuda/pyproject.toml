@@ -18,7 +18,7 @@
 
 [project]
 name = "skulk-llama-server-cuda"
-version = "0.10753.0"
+version = "0.10753.1"
 description = "Pinned CUDA llama-server build for Skulk's served GGUF engine (Linux x86_64 and aarch64)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +32,9 @@ dependencies = [
   # CUDA 12.9, so its user-space runtime must be at least that new.
   "nvidia-cuda-runtime-cu12>=12.9; platform_machine == 'aarch64'",
   "nvidia-cublas-cu12>=12.9; platform_machine == 'aarch64'",
+  # The pinned CUDA binary links NCCL even for single-device startup. Minimal
+  # hosts must not depend on NCCL happening to exist in the build container.
+  "nvidia-nccl-cu12>=2.31.2,<3",
 ]
 
 [project.scripts]
