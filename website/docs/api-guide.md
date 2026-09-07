@@ -2342,7 +2342,12 @@ generated `StoreDownloadResponse` schema describes this wire contract.
 Returns `state`, `inventory_only`, scanned node and discovered/imported artifact
 counts, pending identities, failures, and `last_verified_at`. Automatic imports
 are enabled by default (`inventory_only: false`); inventory-only is an optional
-production rollout mode rather than a prerequisite.
+production rollout mode rather than a prerequisite. If cluster configuration
+removes or disables the local store or automatic reconciliation, the lifetime
+task becomes idle and checks for restored eligibility every ten seconds. It
+resumes automatic scans when this node becomes an enabled store host again,
+without restarting the API. An already running pass keeps its original interval
+before the next eligibility check.
 
 **POST** `/store/reconciliation/rescan`
 

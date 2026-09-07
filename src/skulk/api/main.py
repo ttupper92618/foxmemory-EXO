@@ -13560,16 +13560,15 @@ class API:
     async def _store_reconciliation_loop(self) -> None:
         """Run startup and periodic reconciliation on the store host."""
         reconciliation = self._automatic_store_reconciliation_config()
-        if reconciliation is None:
-            return
         # The API becomes reachable after this lifetime task is scheduled but
         # before its intentional convergence delay expires. Represent that
         # scheduled first pass as active so dashboard clients do not mistake
         # the initial ``idle`` value for terminal convergence.
-        self._reconciliation_status = ReconciliationStatus(
-            state="scanning",
-            inventory_only=reconciliation.inventory_only,
-        )
+        if reconciliation is not None:
+            self._reconciliation_status = ReconciliationStatus(
+                state="scanning",
+                inventory_only=reconciliation.inventory_only,
+            )
         await anyio.sleep(10)
         while True:
             # Cluster configuration can be replaced during the startup delay or
@@ -13579,7 +13578,10 @@ class API:
             reconciliation = self._automatic_store_reconciliation_config()
             if reconciliation is None:
                 self._reconciliation_status = ReconciliationStatus()
-                return
+                # Authoritative configuration can restore local store ownership
+                # without restarting the API. Keep its one lifetime task dormant.
+                await anyio.sleep(10)
+                continue
             try:
                 await self._run_store_reconciliation()
             except Exception as error:  # noqa: BLE001 - lifetime service boundary
