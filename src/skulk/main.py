@@ -8,7 +8,7 @@ import signal
 import socket
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Self, cast
@@ -95,6 +95,7 @@ from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.utils.channels import Receiver, Sender, channel
+from skulk.utils.info_gatherer.info_gatherer import NodeCapabilities
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
@@ -146,6 +147,7 @@ async def _publish_management_node_resources(
     telemetry_sender: TelemetrySender | Sender[NodeTelemetry],
     zenoh_peer_sampler: "ZenohPeerSampler | None" = None,
     poll_interval: float = _NODE_RESOURCES_POLL_INTERVAL_SECONDS,
+    capabilities_provider: Callable[[], frozenset[str]] | None = None,
 ) -> None:
     """Advertise resource truth for a node started without a worker.
 
@@ -165,6 +167,9 @@ async def _publish_management_node_resources(
         poll_interval: Seconds between repeated advertisements for late joiners
             and fallback liveness. The default matches the worker heartbeat
             cadence and stays below the node-health warning threshold.
+        capabilities_provider: Cached extension tags, including withdrawals.
+            No provider means an empty reading; capability service never grants
+            this host inference placement.
 
     Side effects:
         Publishes one immediate and then periodic ``NodeResources`` reading until
@@ -184,6 +189,18 @@ async def _publish_management_node_resources(
                 ),
             )
             await telemetry_sender.send(NodeTelemetry(node_id=node_id, info=resources))
+            await telemetry_sender.send(
+                NodeTelemetry(
+                    node_id=node_id,
+                    info=NodeCapabilities(
+                        capabilities=(
+                            capabilities_provider()
+                            if capabilities_provider is not None
+                            else frozenset()
+                        )
+                    ),
+                )
+            )
         except (ClosedResourceError, BrokenResourceError):
             return
         except Exception as error:
@@ -980,6 +997,10 @@ class Node:
                     "zenoh" if self.data_plane_zenoh else "gossipsub",
                     self.router.telemetry_sender(),
                     self.zenoh_peer_sampler,
+                    _NODE_RESOURCES_POLL_INTERVAL_SECONDS,
+                    lambda: frozenset(
+                        self.telemetry_view.local_advertised_capabilities
+                    ),
                 )
             tg.start_soon(self._monitor_zenoh_isolation)
             if self.store_server:
@@ -1899,9 +1920,8 @@ def main():
         os.environ["SKULK_FAST_SYNCH"] = "off"  # legacy compat
         logger.info("FAST_SYNCH forced OFF")
 
-    node = anyio.run(Node.create, args)
     try:
-        anyio.run(node.run)
+        anyio.run(run_node, args)
     except BaseException as exception:
         logger.opt(exception=exception).critical(
             "Skulk terminated due to unhandled exception"
@@ -1910,6 +1930,16 @@ def main():
     finally:
         logger.info("Skulk shutdown complete")
         logger_cleanup()
+
+
+async def run_node(args: "Args") -> None:
+    """Create and serve a node on one event loop until shutdown.
+
+    Loop-bound extension tasks and transport resources must outlive construction;
+    closing a temporary creation loop cancels them before serving can begin.
+    """
+    node = await Node.create(args)
+    await node.run()
 
 
 class Args(CamelCaseModel):

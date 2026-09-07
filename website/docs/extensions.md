@@ -150,6 +150,28 @@ class MyExtension:
         ...
 ```
 
+Providers may implement `CapabilityReadiness.capability_ready(qualified_id)` to
+expose cached per-capability health. The synchronous check must be fast and must
+not perform I/O. False, a raised exception, or shutdown removes the descriptor
+from local and remote discovery and rejects new unary and streaming calls with
+`not_found`. A caller retaining an old descriptor cannot bypass the check.
+Already admitted work retains its deadline and cancellation contract. Without
+this optional facet, existing providers keep their current behavior. Providers
+should also use `advertise_capability` / `withdraw_capability` when cached health
+changes so telemetry tags follow availability.
+
+`on_start(context)` runs once when the API serving lifetime begins, after node
+construction, on the same event loop used for serving. Extensions that own
+background tasks or child processes should implement the optional asynchronous
+`SupportsExtensionShutdown.on_stop()` hook. At API shutdown, discovery closes
+before hooks run concurrently under a shared thirty-second shielded cleanup budget.
+Hooks must cooperate with cancellation and move blocking work off the loop;
+in-process extensions remain trusted code, not sandboxed processes.
+
+Management-only (`--no-worker`) API nodes publish their capability tags every two
+seconds, including empty withdrawals, while advertising no inference backends.
+This makes installed services discoverable without requiring a model worker.
+
 Discovery then has two layers, cheap and heavy:
 
 1. **Tag** (telemetry): peers see `"echo"` in `read_cluster()` capabilities.

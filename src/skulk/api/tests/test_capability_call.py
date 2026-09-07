@@ -139,9 +139,7 @@ async def test_call_round_trips_through_handler() -> None:
 
 
 async def test_unknown_capability_is_not_found() -> None:
-    result = await _dispatch(
-        _build_api(_EchoProvider()), _call(capability_id="nope")
-    )
+    result = await _dispatch(_build_api(_EchoProvider()), _call(capability_id="nope"))
     assert not result.ok and result.error is not None
     assert result.error.code == "not_found"
 
@@ -161,9 +159,7 @@ async def test_drifted_revision_is_revision_mismatch() -> None:
 
 
 async def test_payload_failing_input_schema_is_invalid_payload() -> None:
-    result = await _dispatch(
-        _build_api(_EchoProvider()), _call(payload={"text": 42})
-    )
+    result = await _dispatch(_build_api(_EchoProvider()), _call(payload={"text": 42}))
     assert not result.ok and result.error is not None
     assert result.error.code == "invalid_payload"
 
@@ -177,9 +173,7 @@ async def test_oversized_payload_is_rejected() -> None:
 
 
 async def test_deadline_yields_typed_timeout() -> None:
-    result = await _dispatch(
-        _build_api(_SlowProvider()), _call(timeout_seconds=0.05)
-    )
+    result = await _dispatch(_build_api(_SlowProvider()), _call(timeout_seconds=0.05))
     assert not result.ok and result.error is not None
     assert result.error.code == "timeout"
 
@@ -352,7 +346,11 @@ async def test_caller_side_out_of_range_timeout_is_typed() -> None:
     api = _build_api(_EchoProvider())
     context = api._extension_context  # pyright: ignore[reportPrivateUsage]
     result = await context.call_capability(
-        NodeId("api-node"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        NodeId("api-node"),
+        "echo",
+        "1.0.0",
+        _ECHO_REVISION,
+        {"text": "x"},
         timeout_seconds=9_999.0,
     )
     assert not result.ok and result.error is not None
@@ -393,7 +391,11 @@ async def test_caller_budget_spans_lookup_and_provider(
     context = api._extension_context  # pyright: ignore[reportPrivateUsage]
     started = anyio.current_time()
     result = await context.call_capability(
-        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        NodeId("n-peer"),
+        "echo",
+        "1.0.0",
+        _ECHO_REVISION,
+        {"text": "x"},
         timeout_seconds=0.3,
     )
     elapsed = anyio.current_time() - started
@@ -418,7 +420,11 @@ async def test_caller_lookup_cancelled_at_deadline(
     context = api._extension_context  # pyright: ignore[reportPrivateUsage]
     started = anyio.current_time()
     result = await context.call_capability(
-        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        NodeId("n-peer"),
+        "echo",
+        "1.0.0",
+        _ECHO_REVISION,
+        {"text": "x"},
         timeout_seconds=0.2,
     )
     elapsed = anyio.current_time() - started
@@ -436,7 +442,11 @@ async def test_caller_invalid_timeout_fails_fast_on_remote_path() -> None:
     context = api._extension_context  # pyright: ignore[reportPrivateUsage]
     for bad in (0.0, -5.0, 9_999.0):
         result = await context.call_capability(
-            NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+            NodeId("n-peer"),
+            "echo",
+            "1.0.0",
+            _ECHO_REVISION,
+            {"text": "x"},
             timeout_seconds=bad,
         )
         assert not result.ok and result.error is not None
@@ -449,7 +459,11 @@ async def test_caller_non_numeric_timeout_is_typed() -> None:
     api = _build_api(_EchoProvider())
     context = api._extension_context  # pyright: ignore[reportPrivateUsage]
     result = await context.call_capability(
-        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        NodeId("n-peer"),
+        "echo",
+        "1.0.0",
+        _ECHO_REVISION,
+        {"text": "x"},
         timeout_seconds="10",  # pyright: ignore[reportArgumentType]
     )
     assert not result.ok and result.error is not None
@@ -487,3 +501,33 @@ async def test_deeply_nested_payload_is_typed_invalid_payload() -> None:
     )
     assert not caller_result.ok and caller_result.error is not None
     assert caller_result.error.code == "invalid_payload"
+
+
+async def test_cached_descriptor_cannot_invoke_withdrawn_provider() -> None:
+    """A caller retaining a valid revision loses execution when readiness drops."""
+
+    class DynamicProvider(_EchoProvider):
+        ready = True
+        calls = 0
+
+        def capability_ready(self, qualified_id: str) -> bool:
+            return self.ready
+
+        async def handle_call(
+            self, context: ExtensionContext, call: CapabilityCall
+        ) -> dict[str, object]:
+            self.calls += 1
+            return await super().handle_call(context, call)
+
+    provider = DynamicProvider()
+    api = _build_api(provider)
+    assert (await _dispatch(api, _call())).ok
+    provider.ready = False
+    result = await _dispatch(api, _call())
+    assert not result.ok and result.error is not None
+    assert result.error.code == "not_found"
+    assert provider.calls == 1
+    assert (await api.list_node_capabilities())["capabilities"] == []
+    provider.ready = True
+    assert (await _dispatch(api, _call())).ok
+    assert provider.calls == 2

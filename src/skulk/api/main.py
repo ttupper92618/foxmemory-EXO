@@ -1629,14 +1629,16 @@ class API:
         self._artifact_inventory_expected_since: dict[NodeId, float] = {}
         self._artifact_inventory_nodes_seen: set[NodeId] = set()
         # Provider extensions (fabric-citizenship Phase 2a): auto-advertise
-        # each served capability's id as its telemetry discovery tag, then run
-        # the extensions' startup hooks with the live context (a pure provider
-        # has no chat hook through which to reach it). Both are guarded; a
-        # broken plugin can never block node startup.
+        # each served capability's id as its telemetry discovery tag. Startup
+        # hooks run in run(), after construction succeeds and on the serving
+        # loop; constructors must not launch unowned background work.
         if self._extensions is not None:
             for descriptor in self._extensions.capability_descriptors:
                 self._telemetry_view.local_advertised_capabilities.add(descriptor.id)
-            self._extensions.run_startup_hooks(self._extension_context)
+
+        # Built-in speech availability is synchronous core state, not plugin
+        # background startup. Preserve empty-capacity withdrawal at construction.
+        self._sync_builtin_speech_capability()
         # Steward liveness history, shared between the canary loop that writes
         # it and the status endpoint that reads it (both event-loop tasks on
         # this node), so an outstanding failed probe surfaces as `degraded`
@@ -2623,7 +2625,8 @@ class API:
                 "Pass the node_id query parameter to describe a reachable "
                 "peer instead of this node (an empty list when the peer is "
                 "unreachable). An empty list otherwise means no provider "
-                "extension is installed."
+                "extension is installed or all installed providers are unready. "
+                "Providers with a readiness facet are filtered at discovery."
             ),
         )(self.list_node_capabilities)
         self.app.post(
@@ -3919,9 +3922,7 @@ class API:
             raise ValueError("Intelligent-fabric mode is disabled")
         await self._send(ProposeStewardAction(proposal=proposal))
 
-    async def load_authorized_steward_model_card(
-        self, model_id: ModelId
-    ) -> ModelCard:
+    async def load_authorized_steward_model_card(self, model_id: ModelId) -> ModelCard:
         """Resolve exact catalog truth for a steward placement proposal.
 
         Args:
@@ -6502,6 +6503,15 @@ class API:
                 "timeout",
                 "provider stream deadline expired during admission",
             )
+
+        # Dynamic admission may yield while the provider is disabled or its
+        # child dies. Recheck before scheduling executable stream work.
+        if not self._extensions.capability_ready(qualified_id):
+            active = self._active_capability_streams.pop(call.call_id, None)
+            if active is not None:
+                self._close_active_provider_input(active)
+            self._provider_observer.record_rejected(qualified_id)
+            return call_failure(call.call_id, "not_found", "capability is not ready")
 
         remaining = call.timeout_seconds - (anyio.current_time() - started_at)
         if remaining <= 0:
@@ -9501,6 +9511,8 @@ class API:
         shutdown_ev = anyio.Event()
 
         try:
+            if self._extensions is not None:
+                self._extensions.run_startup_hooks(self._extension_context)
             async with self._tg as tg:
                 logger.info("Starting API")
                 tg.start_soon(self._apply_state)
@@ -9547,6 +9559,8 @@ class API:
                     with anyio.CancelScope(shield=True):
                         shutdown_ev.set()
         finally:
+            if self._extensions is not None:
+                await self._extensions.run_shutdown_hooks()
             if self._event_log is not None:
                 self._event_log.close()
             self.command_sender.close()
