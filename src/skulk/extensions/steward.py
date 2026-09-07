@@ -122,7 +122,9 @@ async def collect_steward_tools(
     conflicts: set[str] = set()
     for provider, supplied in zip(providers, discovered, strict=True):
         for tool in supplied:
-            if tool.mode == "proposal" and not proposals_allowed:
+            if tool.mode == "proposal" and (
+                not proposals_allowed or not context.steward_actions_allowed()
+            ):
                 continue
             if tool.name in bindings or tool.name in conflicts:
                 bindings.pop(tool.name, None)
@@ -152,7 +154,9 @@ async def invoke_steward_tool(
     tools cannot be invoked by a read-only steward session even via a forged call.
     """
     try:
-        if binding.tool.mode == "proposal" and not proposals_allowed:
+        if binding.tool.mode == "proposal" and (
+            not proposals_allowed or not context.steward_actions_allowed()
+        ):
             raise ValueError("proposal authority required")
         raw = json.dumps(arguments, allow_nan=False)
         if len(raw.encode()) > 8192:

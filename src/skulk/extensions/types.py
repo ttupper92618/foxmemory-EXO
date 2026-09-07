@@ -20,7 +20,7 @@ Design invariants (enforced by the call sites in :mod:`skulk.api.main` and
   loaded-extension list is empty.
 """
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, final, runtime_checkable
 
@@ -336,6 +336,9 @@ class ExtensionContext:
             provider node with a typed result (fabric-citizenship Phase 2b).
         stream_capability: Open a streaming capability whose active input and
             output directions travel on provider DATA (Phase 3).
+        steward_actions_allowed: Read the current intelligent-fabric action switch.
+            Adapters must recheck before proposal or approved-action dispatch; this
+            grants no operator approval. Hosts that omit it fail closed.
     """
 
     node_id: NodeId
@@ -347,6 +350,7 @@ class ExtensionContext:
     describe_node: DescribeNode
     call_capability: CallCapability
     stream_capability: StreamCapability
+    steward_actions_allowed: Callable[[], bool] = lambda: False
 
 
 @final

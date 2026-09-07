@@ -1,6 +1,7 @@
 """Steward adapters cannot bypass per-request proposal permission or drift checks."""
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from typing import final
 
 from pydantic import JsonValue
@@ -85,6 +86,7 @@ def context() -> ExtensionContext:
         describe_node=describe_stub,
         call_capability=call_stub,
         stream_capability=stream_stub,
+        steward_actions_allowed=lambda: True,
     )
 
 
@@ -198,5 +200,20 @@ async def test_shutdown_withdraws_previously_bound_adapter() -> None:
     assert await registry.steward_tools(context(), proposals_allowed=True) == ()
     assert "error" in await registry.invoke_steward_tool(
         binding, context(), {"text": "request"}, proposals_allowed=True
+    )
+    assert adapter.calls == 0
+
+
+async def test_action_switch_is_rechecked_after_tool_collection() -> None:
+    """A pending model call cannot preserve permission across a global disable."""
+    adapter = Adapter(proposal=True)
+    enabled = True
+    host = replace(context(), steward_actions_allowed=lambda: enabled)
+    bindings = await collect_steward_tools([adapter], host, proposals_allowed=True)
+    assert len(bindings) == 1
+    enabled = False
+    assert await collect_steward_tools([adapter], host, proposals_allowed=True) == ()
+    assert "error" in await invoke_steward_tool(
+        bindings[0], host, {"text": "request"}, proposals_allowed=True
     )
     assert adapter.calls == 0

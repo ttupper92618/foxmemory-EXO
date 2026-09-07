@@ -957,3 +957,9 @@ resource telemetry, without advertising inference backends.
 The engine manifest also sets `LLAMA_SERVER_CUDA_MIN_REVISION`; both installation
 and runtime selection enforce this packaging floor. Revisit it when advancing the
 engine pin; revision 1 for b10753 excludes the NCCL/CPU portability defects.
+
+The trusted steward extension facet reads the current global intelligent-fabric
+action switch through `ExtensionContext.steward_actions_allowed`. Proposal
+collection and dispatch recheck it; private approved-action adapters must also
+recheck it on every dispatch or retry. The callback supplies no approval evidence
+or signing authority, and omitted callbacks fail closed.
