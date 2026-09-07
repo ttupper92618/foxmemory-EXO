@@ -302,11 +302,10 @@ class ResumableShardDownloader(ShardDownloader):
         )
         allow_patterns = [config_path] if config_only else None
 
-        # Companions download BEFORE the base on purpose: the base repo's
-        # "complete" progress event becomes cluster-visible download state
-        # the moment it fires, and the planner dispatches model loads off
-        # that state — so it must mean "everything the model needs is
-        # here", not "the base is here and the sidecar is on its way".
+        # Companions download before the base so required sidecar failures
+        # surface before spending bandwidth on the base. ensure_shard must
+        # finish both artifacts and installed identities before the coordinator
+        # advertises completion and permits the planner to dispatch model loads.
         # Criticality differs per companion: split vision weights are
         # load-bearing (their failure fails the base — a vision model
         # without them is broken), while MTP sidecars and assistants are
@@ -395,7 +394,13 @@ class ResumableShardDownloader(ShardDownloader):
             replacement_identity=base_replacement_identity,
         )
 
-        if not config_only and base_progress.status == "complete":
+        if base_progress.status != "complete":
+            raise RuntimeError(
+                f"Model {shard.model_card.model_id} did not finish downloading "
+                f"(status={base_progress.status!r})"
+            )
+
+        if not config_only:
             artifact_directory = target_dir.parent if target_dir.is_file() else target_dir
             record = await asyncio.to_thread(
                 build_installed_card_record,

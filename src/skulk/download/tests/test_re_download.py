@@ -15,7 +15,10 @@ import pytest
 from skulk.download import coordinator as coordinator_module
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.download_utils import RepoDownloadProgress
-from skulk.download.impl_shard_downloader import SingletonShardDownloader
+from skulk.download.impl_shard_downloader import (
+    ResumableShardDownloader,
+    SingletonShardDownloader,
+)
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.commands import (
@@ -177,6 +180,100 @@ class SlowCancellationShardDownloader(FakeShardDownloader):
                     await self.release_cleanup.wait()
         self.restarted.set()
         return await super().ensure_shard(shard)
+
+
+@pytest.mark.parametrize("status", ["not_started", "in_progress"])
+async def test_incomplete_transfer_cannot_return_an_installed_path(
+    tmp_path: Path, status: str
+) -> None:
+    """A non-raising fetch failure must not authorize a completed installation."""
+
+    shard = _make_shard()
+    progress = await FakeShardDownloader().get_shard_download_status_for_shard(shard)
+    progress = progress.model_copy(update={"status": status})
+    downloader = ResumableShardDownloader()
+    with patch.object(
+        downloader,
+        "_download_with_capacity",
+        new=AsyncMock(return_value=(tmp_path, progress)),
+    ), pytest.raises(RuntimeError, match="did not finish downloading"):
+        await downloader.ensure_shard(shard)
+    assert not (tmp_path / ".skulk" / "installed-card.json").exists()
+
+
+@pytest.mark.parametrize("outcome", ["complete", "failed", "cancelled"])
+async def test_transfer_completion_waits_for_installed_identity(
+    tmp_path: Path, outcome: str
+) -> None:
+    """Completed bytes cannot start a runner before identity finalization."""
+
+    transferred = anyio.Event()
+    finalize = anyio.Event()
+    directory = tmp_path / "staged-model"
+    directory.mkdir()
+    shard = _make_shard(
+        source_revision="a" * 40,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'a' * 52}",
+    )
+
+    class FinalizingDownloader(FakeShardDownloader):
+        """Hold installation after the real transfer-complete callback."""
+
+        async def ensure_shard(
+            self, shard: ShardMetadata, config_only: bool = False
+        ) -> Path:
+            """Publish signed identity only when the test releases finalization."""
+            await super().ensure_shard(shard, config_only)
+            transferred.set()
+            await finalize.wait()
+            if outcome == "failed":
+                raise OSError("installed identity write failed")
+            (directory / "model.gguf").write_bytes(b"weights")
+            (directory / ".skulk-source-revision").write_text("a" * 40 + "\n")
+            write_installed_card(
+                directory, build_installed_card_record(directory, shard.model_card)
+            )
+            return directory
+
+    _, commands = channel[ForwarderDownloadCommand]()
+    events, received_events = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    downloader = FinalizingDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=commands,
+        event_sender=events,
+        telemetry_sender=telemetry,
+    )
+    initial = await downloader.get_shard_download_status_for_shard(shard)
+    with anyio.fail_after(5):
+        async with coordinator._tg:
+            coordinator._start_download_task(shard, initial)
+            await transferred.wait()
+            assert not isinstance(coordinator.download_status[MODEL_ID], DownloadCompleted)
+            with pytest.raises(anyio.WouldBlock):
+                received_events.receive_nowait()
+            if outcome == "cancelled":
+                coordinator.active_downloads[MODEL_ID].cancel()
+            else:
+                finalize.set()
+        if outcome == "cancelled":
+            with pytest.raises(anyio.WouldBlock):
+                received_events.receive_nowait()
+        else:
+            event = received_events.receive_nowait()
+            assert isinstance(event, NodeDownloadProgress)
+            if outcome == "failed":
+                assert isinstance(event.download_progress, DownloadFailed)
+            else:
+                completed = event.download_progress
+                assert isinstance(completed, DownloadCompleted)
+                assert completed.model_directory == str(directory)
+                require_registry_installed_artifact(directory, shard.model_card)
+            with pytest.raises(anyio.WouldBlock):
+                received_events.receive_nowait()
 
 
 async def test_purge_all_unregisters_only_companion_artifact_alias(
