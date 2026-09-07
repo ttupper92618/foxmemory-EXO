@@ -204,8 +204,9 @@ async def test_incomplete_transfer_cannot_return_an_installed_path(
 @pytest.mark.parametrize(
     "outcome", ["complete", "failed", "cancelled", "cancelled_return"]
 )
+@pytest.mark.parametrize("file_result", [False, True])
 async def test_transfer_completion_waits_for_installed_identity(
-    tmp_path: Path, outcome: str
+    tmp_path: Path, outcome: str, file_result: bool
 ) -> None:
     """Completed bytes cannot start a runner before identity finalization."""
 
@@ -242,7 +243,7 @@ async def test_transfer_completion_waits_for_installed_identity(
             write_installed_card(
                 directory, build_installed_card_record(directory, shard.model_card)
             )
-            return directory
+            return directory / "model.gguf" if file_result else directory
 
     _, commands = channel[ForwarderDownloadCommand]()
     events, received_events = channel[Event]()

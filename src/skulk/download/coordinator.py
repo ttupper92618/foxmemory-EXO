@@ -783,7 +783,7 @@ class DownloadCoordinator:
                         shard_metadata=shard,
                         node_id=self.node_id,
                         total=shard.model_card.storage_size,
-                        model_directory=str(path),
+                        model_directory=str(path.parent if path.is_file() else path),
                     )
                     await self._emit_status(completed)
                     self._reset_progress_throttle(model_id)
