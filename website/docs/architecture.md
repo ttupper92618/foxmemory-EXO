@@ -1527,6 +1527,15 @@ The adapters live in `src/skulk/api/adapters/`. Each one handles request normali
 
 ## Extensions (plugins)
 
+Extension startup and serving share one event loop. The API starts hooks only
+once its runtime begins and invokes optional asynchronous shutdown hooks before
+closing its lifetime, with discovery withdrawn and a shared thirty-second cleanup
+budget. Optional cached `CapabilityReadiness` checks filter discovery and new
+unary/stream admission; readiness failure cannot leave an executable stale
+descriptor. Management-only API nodes publish extension tags and withdrawals on
+the normal telemetry cadence without advertising inference backends.
+
+
 Skulk can load separately installed Python packages as extensions and call
 them at well-defined points in the serving path. Extensions are how
 deployment-specific behavior (an audit logger, a request policy filter, a

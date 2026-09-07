@@ -3021,6 +3021,13 @@ curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
 
 ## Extension Capabilities
 
+Providers with a dynamic readiness facet appear in capability discovery only
+while ready. A cached descriptor does not grant continued admission: new unary
+and streaming calls to an unavailable capability return typed `not_found`.
+Readiness is rechecked after asynchronous stream admission. Already admitted
+calls retain their normal deadline and cancellation behavior.
+
+
 ### List a node's served capabilities
 
 ```

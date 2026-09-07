@@ -12,6 +12,7 @@ from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from importlib.metadata import EntryPoint, PackageNotFoundError, entry_points, version
 from typing import cast, final
 
+import anyio
 from loguru import logger
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
@@ -21,11 +22,13 @@ from skulk.extensions.types import (
     CapabilityCallHandler,
     CapabilityInputStreamHandler,
     CapabilityProvider,
+    CapabilityReadiness,
     CapabilityStreamHandler,
     ChatMiddleware,
     ChatResponseSummary,
     ExtensionContext,
     SkulkExtension,
+    SupportsExtensionShutdown,
     SupportsExtensionStartup,
 )
 from skulk.shared.types.chunks import (
@@ -37,6 +40,7 @@ from skulk.shared.types.chunks import (
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 
 ENTRY_POINT_GROUP = "skulk.extensions"
+_EXTENSION_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
 # Chunk union yielded by the API's per-command chat stream; the tap must be
 # transparent to every variant.
@@ -73,6 +77,9 @@ class LoadedExtensions:
         crash the process (the "loader never raises" contract).
         """
         self._extension_instances: list[SkulkExtension] = []
+        self._capability_providers: dict[str, SkulkExtension] = {}
+        self._started = False
+        self._stopping = False
         self._names: list[str] = []
         self._chat_middlewares: list[tuple[str, ChatMiddleware]] = []
         self._startup_hooks: list[tuple[str, SupportsExtensionStartup]] = []
@@ -140,6 +147,7 @@ class LoadedExtensions:
                         continue
                     seen_qualified_ids.add(descriptor.qualified_id)
                     self._capability_descriptors.append(descriptor)
+                    self._capability_providers[descriptor.qualified_id] = extension
                     # Call facet (Phase 2b): a provider that also implements
                     # handle_call serves this descriptor's unary calls. A
                     # descriptor without a handler is discovery-only (valid:
@@ -197,8 +205,7 @@ class LoadedExtensions:
         combined._startup_hooks.extend(self._startup_hooks)
 
         seen_qualified_ids = {
-            descriptor.qualified_id
-            for descriptor in combined._capability_descriptors
+            descriptor.qualified_id for descriptor in combined._capability_descriptors
         }
         for descriptor in self._capability_descriptors:
             qualified_id = descriptor.qualified_id
@@ -210,6 +217,9 @@ class LoadedExtensions:
                 continue
             seen_qualified_ids.add(qualified_id)
             combined._capability_descriptors.append(descriptor)
+            combined._capability_providers[qualified_id] = self._capability_providers[
+                qualified_id
+            ]
             call_handler = self._call_handlers.get(qualified_id)
             if call_handler is not None:
                 combined._call_handlers[qualified_id] = call_handler
@@ -231,7 +241,11 @@ class LoadedExtensions:
     @property
     def capability_descriptors(self) -> tuple[CapabilityDescriptor, ...]:
         """All capability descriptors served by loaded provider extensions."""
-        return tuple(self._capability_descriptors)
+        return tuple(
+            descriptor
+            for descriptor in self._capability_descriptors
+            if self.capability_ready(descriptor.qualified_id)
+        )
 
     def call_handler(
         self, qualified_id: str
@@ -242,12 +256,16 @@ class LoadedExtensions:
         loaded provider serves unary calls for that capability (unknown id,
         wrong version, or a discovery-only descriptor without a handler).
         """
+        if not self.capability_ready(qualified_id):
+            return None
         return self._call_handlers.get(qualified_id)
 
     def handled_capability_ids(self) -> frozenset[str]:
         """Capability ids (bare, unversioned) with at least one call handler."""
         return frozenset(
-            entry[2].id for entry in self._call_handlers.values()
+            entry[2].id
+            for entry in self._call_handlers.values()
+            if self.capability_ready(entry[2].qualified_id)
         )
 
     def stream_handler(
@@ -262,14 +280,59 @@ class LoadedExtensions:
     ):
         """Look up the streaming handler serving ``id@version`` on this node."""
 
+        if not self.capability_ready(qualified_id):
+            return None
         return self._stream_handlers.get(qualified_id)
 
     def handled_stream_capability_ids(self) -> frozenset[str]:
         """Bare capability ids with an executable streaming handler."""
 
         return frozenset(
-            entry[2].id for entry in self._stream_handlers.values()
+            entry[2].id
+            for entry in self._stream_handlers.values()
+            if self.capability_ready(entry[2].qualified_id)
         )
+
+    def capability_ready(self, qualified_id: str) -> bool:
+        """Read cached provider readiness; unknown, stopping and broken fail closed."""
+        provider = self._capability_providers.get(qualified_id)
+        if provider is None or self._stopping:
+            return False
+        try:
+            return (
+                provider.capability_ready(qualified_id) is True
+                if isinstance(provider, CapabilityReadiness)
+                else True
+            )
+        except Exception:
+            # Cached readiness is a plugin boundary: failures cannot expose an
+            # executable contract or leak a provider's private exception payload.
+            return False
+
+    async def run_shutdown_hooks(self) -> None:
+        """Withdraw discovery and clean owned resources once, within thirty seconds.
+
+        Hooks are independent and concurrent, so one failing or slow extension
+        cannot prevent another from flushing state. Cooperative cancellation is
+        required of in-process extensions, just as for ordinary API handlers.
+        """
+        if self._stopping:
+            return
+        self._stopping = True
+
+        async def stop(extension: SupportsExtensionShutdown) -> None:
+            try:
+                await extension.on_stop()
+            except Exception as error:
+                logger.error(f"Extension shutdown failed: {type(error).__name__}")
+
+        with anyio.move_on_after(_EXTENSION_SHUTDOWN_TIMEOUT_SECONDS, shield=True) as scope:
+            async with anyio.create_task_group() as tasks:
+                for extension in self._extension_instances:
+                    if isinstance(extension, SupportsExtensionShutdown):
+                        tasks.start_soon(stop, extension)
+        if scope.cancel_called:
+            logger.warning("Extension shutdown exceeded the thirty-second budget")
 
     def run_startup_hooks(self, context: ExtensionContext) -> None:
         """Run every extension's ``on_start`` hook, each one guarded.
@@ -279,6 +342,9 @@ class LoadedExtensions:
         extension continues without its startup work; startup of the node is
         never blocked by a broken plugin.
         """
+        if self._started or self._stopping:
+            return
+        self._started = True
         for name, extension in self._startup_hooks:
             try:
                 extension.on_start(context)
@@ -395,9 +461,7 @@ class LoadedExtensions:
         try:
             await middleware.observe_chat_response(context, task_params, summary)
         except Exception as exc:  # noqa: BLE001 - extension must not break serving
-            logger.error(
-                f"extension '{name}' observe_chat_response failed: {exc}"
-            )
+            logger.error(f"extension '{name}' observe_chat_response failed: {exc}")
 
 
 def _validate_extension(

@@ -930,3 +930,12 @@ GitHub's API doesn't support direct image upload for PR comments. Workaround:
    git push origin <branch>
    ```
    The images still render in the PR comment because they reference the permanent commit SHA.
+
+### Extension runtime ownership
+
+The CLI creates and serves Node on one event loop. API runtime entry invokes
+extension startup; optional asynchronous on_stop hooks receive a shared thirty-second
+shielded cleanup budget after discovery withdrawal. CapabilityReadiness is an
+optional cached predicate covering discovery and new unary/stream admission.
+Management-only API nodes gossip capability tags and empty withdrawals alongside
+resource telemetry, without advertising inference backends.

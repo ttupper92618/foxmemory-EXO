@@ -9,6 +9,8 @@ observable locally: a node advertising a capability sees it in its own
 from datetime import datetime, timezone
 from typing import cast
 
+import pytest
+
 from skulk.api.main import API
 from skulk.extensions import (
     CapabilityDescriptor,
@@ -25,9 +27,7 @@ from skulk.utils.channels import channel
 from skulk.utils.info_gatherer.info_gatherer import NodeCapabilities
 
 
-def _build_api(
-    view: TelemetryView, extensions: LoadedExtensions | None = None
-) -> API:
+def _build_api(view: TelemetryView, extensions: LoadedExtensions | None = None) -> API:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     _, event_receiver = channel[IndexedEvent]()
@@ -126,19 +126,22 @@ class _ProviderExtension:
         self.started_with.append(context)
 
 
-def test_provider_descriptor_id_is_auto_advertised_and_on_start_runs() -> None:
+def test_provider_is_advertised_without_starting_background_work_in_constructor() -> (
+    None
+):
     provider = _ProviderExtension()
     view = TelemetryView()
     _build_api(view, extensions=LoadedExtensions([provider]))
     # The descriptor's id became the telemetry discovery tag without the
-    # extension calling advertise itself, and on_start ran with the live
-    # context (a pure provider has no chat hook through which to reach it).
+    # extension calling advertise itself. Startup waits for the serving loop.
     assert view.local_advertised_capabilities == {"echo"}
-    assert len(provider.started_with) == 1
+    assert provider.started_with == []
 
 
 async def test_list_node_capabilities_serves_descriptors_and_revisions() -> None:
-    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    api = _build_api(
+        TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()])
+    )
     payload = await api.list_node_capabilities()
     assert payload["node_id"] == "api-node"
     capabilities = cast("list[object]", payload["capabilities"])
@@ -157,7 +160,9 @@ async def test_list_node_capabilities_empty_without_extensions() -> None:
 
 
 async def test_describe_node_local_returns_descriptors() -> None:
-    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    api = _build_api(
+        TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()])
+    )
     descriptors = await api._extension_context.describe_node(NodeId("api-node"))  # pyright: ignore[reportPrivateUsage]
     assert descriptors == (_ECHO,)
 
@@ -184,7 +189,9 @@ def test_withdraw_capability_removes_tag() -> None:
 
 
 async def test_list_node_capabilities_with_own_node_id_serves_local() -> None:
-    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    api = _build_api(
+        TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()])
+    )
     payload = await api.list_node_capabilities(node_id="api-node")
     assert payload["node_id"] == "api-node"
     assert len(cast("list[object]", payload["capabilities"])) == 1
@@ -217,8 +224,45 @@ async def test_state_merge_surfaces_node_capabilities() -> None:
 async def test_list_node_capabilities_blank_node_id_means_local() -> None:
     # A blank or whitespace-padded node_id describes this node rather than
     # proxying to a literal empty peer id.
-    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    api = _build_api(
+        TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()])
+    )
     for raw in ("", "   "):
         payload = await api.list_node_capabilities(node_id=raw)
         assert payload["node_id"] == "api-node"
         assert len(cast("list[object]", payload["capabilities"])) == 1
+
+
+async def test_api_runtime_owns_extension_startup_and_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed serving startup still cleans hooks on the loop that started them."""
+    import asyncio
+
+    from skulk.utils.task_group import TaskGroup
+
+    class LifecycleProvider(_ProviderExtension):
+        def __init__(self) -> None:
+            super().__init__()
+            self.loop: asyncio.AbstractEventLoop | None = None
+            self.stopped = False
+
+        def on_start(self, context: ExtensionContext) -> None:
+            self.loop = asyncio.get_running_loop()
+            super().on_start(context)
+
+        async def on_stop(self) -> None:
+            assert asyncio.get_running_loop() is self.loop
+            self.stopped = True
+
+    async def fail_before_serving(self: TaskGroup) -> None:
+        raise RuntimeError("injected serving startup failure")
+
+    provider = LifecycleProvider()
+    api = _build_api(TelemetryView(), extensions=LoadedExtensions([provider]))
+    assert provider.started_with == []
+    monkeypatch.setattr(TaskGroup, "__aenter__", fail_before_serving)
+    with pytest.raises(RuntimeError, match="injected serving startup failure"):
+        await api.run()
+    assert len(provider.started_with) == 1
+    assert provider.stopped

@@ -105,9 +105,7 @@ class DescribeNode(Protocol):
     cheap.
     """
 
-    async def __call__(
-        self, node_id: NodeId
-    ) -> tuple[CapabilityDescriptor, ...]: ...
+    async def __call__(self, node_id: NodeId) -> tuple[CapabilityDescriptor, ...]: ...
 
 
 @runtime_checkable
@@ -124,6 +122,21 @@ class CapabilityProvider(Protocol):
 
     def capabilities(self) -> Sequence[CapabilityDescriptor]:
         """Return the capability descriptors this extension serves."""
+        ...
+
+
+@runtime_checkable
+class CapabilityReadiness(Protocol):
+    """Optional immediate readiness check for each installed capability.
+
+    Discovery and new unary/stream admission consult this facet. Return a cached
+    boolean without blocking or I/O; false or a raised exception hides the
+    descriptor and refuses new calls. Already admitted calls keep their ordinary
+    deadline and cancellation contract. Providers without this facet stay ready.
+    """
+
+    def capability_ready(self, qualified_id: str) -> bool:
+        """Return readiness for the exact ``id@version`` without side effects."""
         ...
 
 
@@ -281,6 +294,21 @@ class SupportsExtensionStartup(Protocol):
 
     def on_start(self, context: "ExtensionContext") -> None:
         """Run startup registration with the live extension context."""
+        ...
+
+
+@runtime_checkable
+class SupportsExtensionShutdown(Protocol):
+    """Optional asynchronous cleanup of extension-owned background resources.
+
+    The API withdraws provider discovery before invoking cleanup on its original
+    event loop. Hooks run concurrently under a thirty-second cancellation-shielded
+    budget. Implementations must cooperate with cancellation and keep blocking
+    work off the event loop; this trusted-code hook is not a process sandbox.
+    """
+
+    async def on_stop(self) -> None:
+        """Flush bounded state and stop owned tasks/processes before returning."""
         ...
 
 
