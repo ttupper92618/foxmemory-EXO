@@ -1264,8 +1264,8 @@ The AGENTS.md "Documentation" section requires updates here when architectural s
 
 Keep entries terse. Narrative belongs in [Architecture](architecture).
 
-The trusted steward extension facet reads the current global intelligent-fabric
-action switch through `ExtensionContext.steward_actions_allowed`. Proposal
+The trusted steward extension facet reads the current intelligent-fabric mode and global
+`SKULK_FABRIC_CAPABILITIES_DISABLE` kill switch through `ExtensionContext.steward_actions_allowed`. Proposal
 collection and dispatch recheck it; private approved-action adapters must also
 recheck it on every dispatch or retry. The callback supplies no approval evidence
 or signing authority, and omitted callbacks fail closed.

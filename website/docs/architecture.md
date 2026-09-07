@@ -1871,8 +1871,8 @@ rust/                   # Rust crates: networking (libp2p), skulk_pyo3_bindings,
 
 Maintenance discipline for this doc and the [Architecture Reference](architecture-reference) lives in [AGENTS.md](https://github.com/Foxlight-Foundation/Skulk/blob/main/AGENTS.md). Architectural shape changes (new component, new event, new pubsub topic, new state field, new major API endpoint, new family adapter) update these docs in the same commit as the code.
 
-The trusted steward extension facet reads the current global intelligent-fabric
-action switch through `ExtensionContext.steward_actions_allowed`. Proposal
+The trusted steward extension facet reads the current intelligent-fabric mode and global
+`SKULK_FABRIC_CAPABILITIES_DISABLE` kill switch through `ExtensionContext.steward_actions_allowed`. Proposal
 collection and dispatch recheck it; private approved-action adapters must also
 recheck it on every dispatch or retry. The callback supplies no approval evidence
 or signing authority, and omitted callbacks fail closed.

@@ -336,7 +336,7 @@ class ExtensionContext:
             provider node with a typed result (fabric-citizenship Phase 2b).
         stream_capability: Open a streaming capability whose active input and
             output directions travel on provider DATA (Phase 3).
-        steward_actions_allowed: Read the current intelligent-fabric action switch.
+        steward_actions_allowed: Read intelligent-fabric mode and the global capability kill switch.
             Adapters must recheck before proposal or approved-action dispatch; this
             grants no operator approval. Hosts that omit it fail closed.
     """

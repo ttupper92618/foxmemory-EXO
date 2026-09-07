@@ -1583,7 +1583,10 @@ class API:
             # Phase 3 streaming directions travel on the provider DATA topic.
             # The extension-facing callable remains transport-abstract.
             stream_capability=self._stream_capability,
-            steward_actions_allowed=self._intelligent_fabric_enabled,
+            steward_actions_allowed=lambda: (
+                self._intelligent_fabric_enabled()
+                and os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") != "1"
+            ),
         )
         # In-flight extension capability calls served by this node; bounded by
         # _MAX_CONCURRENT_CAPABILITY_CALLS (single-threaded loop => plain int).
