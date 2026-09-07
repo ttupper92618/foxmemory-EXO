@@ -15,7 +15,10 @@ import pytest
 from skulk.download import coordinator as coordinator_module
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.download_utils import RepoDownloadProgress
-from skulk.download.impl_shard_downloader import SingletonShardDownloader
+from skulk.download.impl_shard_downloader import (
+    ResumableShardDownloader,
+    SingletonShardDownloader,
+)
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.commands import (
@@ -177,6 +180,157 @@ class SlowCancellationShardDownloader(FakeShardDownloader):
                     await self.release_cleanup.wait()
         self.restarted.set()
         return await super().ensure_shard(shard)
+
+
+@pytest.mark.parametrize("status", ["not_started", "in_progress"])
+async def test_incomplete_transfer_cannot_return_an_installed_path(
+    tmp_path: Path, status: str
+) -> None:
+    """A non-raising fetch failure must not authorize a completed installation."""
+
+    shard = _make_shard()
+    progress = await FakeShardDownloader().get_shard_download_status_for_shard(shard)
+    progress = progress.model_copy(update={"status": status})
+    downloader = ResumableShardDownloader()
+    with patch.object(
+        downloader,
+        "_download_with_capacity",
+        new=AsyncMock(return_value=(tmp_path, progress)),
+    ), pytest.raises(RuntimeError, match="did not finish downloading"):
+        await downloader.ensure_shard(shard)
+    assert not (tmp_path / ".skulk" / "installed-card.json").exists()
+
+
+@pytest.mark.parametrize(
+    "outcome", ["complete", "failed", "cancelled", "cancelled_return"]
+)
+@pytest.mark.parametrize("file_result", [False, True])
+async def test_transfer_completion_waits_for_installed_identity(
+    tmp_path: Path, outcome: str, file_result: bool
+) -> None:
+    """Completed bytes cannot start a runner before identity finalization."""
+
+    transferred = anyio.Event()
+    finalize = anyio.Event()
+    directory = tmp_path / "staged-model"
+    directory.mkdir()
+    shard = _make_shard(
+        source_revision="a" * 40,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'a' * 52}",
+    )
+
+    class FinalizingDownloader(FakeShardDownloader):
+        """Hold installation after the real transfer-complete callback."""
+
+        async def ensure_shard(
+            self, shard: ShardMetadata, config_only: bool = False
+        ) -> Path:
+            """Publish signed identity only when the test releases finalization."""
+            await super().ensure_shard(shard, config_only)
+            transferred.set()
+            try:
+                await finalize.wait()
+            except anyio.get_cancelled_exc_class():
+                # Some installers shield finalization and return after their
+                # caller cancels. Their result cannot resurrect cancelled work.
+                if outcome != "cancelled_return":
+                    raise
+            if outcome == "failed":
+                raise OSError("installed identity write failed")
+            (directory / "model.gguf").write_bytes(b"weights")
+            (directory / ".skulk-source-revision").write_text("a" * 40 + "\n")
+            write_installed_card(
+                directory, build_installed_card_record(directory, shard.model_card)
+            )
+            return directory / "model.gguf" if file_result else directory
+
+    _, commands = channel[ForwarderDownloadCommand]()
+    events, received_events = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    downloader = FinalizingDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=commands,
+        event_sender=events,
+        telemetry_sender=telemetry,
+    )
+    initial = await downloader.get_shard_download_status_for_shard(shard)
+    with anyio.fail_after(5):
+        async with coordinator._tg:
+            coordinator._start_download_task(shard, initial)
+            await transferred.wait()
+            assert not isinstance(coordinator.download_status[MODEL_ID], DownloadCompleted)
+            with pytest.raises(anyio.WouldBlock):
+                received_events.receive_nowait()
+            if outcome.startswith("cancelled"):
+                coordinator.active_downloads[MODEL_ID].cancel()
+            else:
+                finalize.set()
+        if outcome.startswith("cancelled"):
+            with pytest.raises(anyio.WouldBlock):
+                received_events.receive_nowait()
+        else:
+            event = received_events.receive_nowait()
+            assert isinstance(event, NodeDownloadProgress)
+            if outcome == "failed":
+                assert isinstance(event.download_progress, DownloadFailed)
+            else:
+                completed = event.download_progress
+                assert isinstance(completed, DownloadCompleted)
+                assert completed.model_directory == str(directory)
+                require_registry_installed_artifact(directory, shard.model_card)
+            with pytest.raises(anyio.WouldBlock):
+                received_events.receive_nowait()
+
+
+async def test_nested_companion_progress_cannot_strand_an_unowned_download() -> None:
+    """Incidental transfers cannot block a later explicit companion request."""
+
+    parent = _make_shard()
+    companion = _make_shard(ModelId("test-org/companion"))
+    requested: list[ModelId] = []
+
+    class CompanionDownloader(FakeShardDownloader):
+        """Emit nested companion callbacks while installing the parent."""
+
+        async def ensure_shard(
+            self, shard: ShardMetadata, config_only: bool = False
+        ) -> Path:
+            """Report companion transfer progress without a separate task."""
+            requested.append(shard.model_card.model_id)
+            if shard.model_card.model_id == MODEL_ID:
+                progress = await self.get_shard_download_status_for_shard(companion)
+                progress = progress.model_copy(update={"status": "in_progress"})
+                for callback in self._progress_callbacks:
+                    await callback(companion, progress)
+                await super().ensure_shard(companion, config_only)
+            return await super().ensure_shard(shard, config_only)
+
+    _, commands = channel[ForwarderDownloadCommand]()
+    events, received_events = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    downloader = CompanionDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=commands,
+        event_sender=events,
+        telemetry_sender=telemetry,
+    )
+    with patch.object(
+        coordinator, "_resolve_or_refresh_complete_artifact", new=AsyncMock(return_value=None)
+    ), anyio.fail_after(5):
+        async with coordinator._tg:
+            await coordinator._start_download(parent)
+            assert await _wait_for_download_completed(received_events, MODEL_ID)
+            assert companion.model_card.model_id not in coordinator.download_status
+            await coordinator._start_download(companion)
+            assert await _wait_for_download_completed(
+                received_events, companion.model_card.model_id
+            )
+    assert requested == [MODEL_ID, companion.model_card.model_id]
 
 
 async def test_purge_all_unregisters_only_companion_artifact_alias(

@@ -303,18 +303,16 @@ class DownloadCoordinator:
         self, callback_shard: ShardMetadata, progress: RepoDownloadProgress
     ) -> None:
         model_id = callback_shard.model_card.model_id
-        if model_id in self._suppressed_progress:
+        if model_id in self._suppressed_progress or model_id not in self.active_downloads:
+            # Nested companion transfers belong to their parent's installation.
+            # Recording them as separate ongoing jobs strands those entries:
+            # only the requested shard has an owned finalization task.
             return
 
         if progress.status == "complete":
-            completed = DownloadCompleted(
-                shard_metadata=callback_shard,
-                node_id=self.node_id,
-                total=progress.total,
-                model_directory=self._model_dir(model_id),
-            )
-            await self._emit_status(completed)
-            self._reset_progress_throttle(model_id)
+            # Transfer completion precedes installed-card hashing/persistence.
+            # Only ensure_shard returning can authorize the planner to load.
+            return
         elif progress.status == "in_progress":
             total_bytes = progress.total.in_bytes
             fraction = (
@@ -778,24 +776,17 @@ class DownloadCoordinator:
                 path: Path | None = None
                 with cancel_scope:
                     path = await self.shard_downloader.ensure_shard(shard)
-                if path is not None:
-                    # Correct the model_directory in case the downloader staged to a
-                    # non-default location (e.g. the model store staging path rather
-                    # than the standard SKULK_MODELS_DIR).  The progress callback fired
-                    # inside ensure_shard() always uses _model_dir(), so we override it
-                    # here with the actual returned path.
-                    actual_dir = str(path)
-                    if actual_dir != self._model_dir(model_id):
-                        existing = self.download_status.get(model_id)
-                        if isinstance(existing, DownloadCompleted):
-                            corrected = DownloadCompleted(
-                                shard_metadata=existing.shard_metadata,
-                                node_id=existing.node_id,
-                                total=existing.total,
-                                read_only=existing.read_only,
-                                model_directory=actual_dir,
-                            )
-                            await self._emit_status(corrected)
+                if path is not None and not cancel_scope.cancel_called:
+                    # The returned path and installed identity become visible in
+                    # one terminal event, after all installation work succeeds.
+                    completed = DownloadCompleted(
+                        shard_metadata=shard,
+                        node_id=self.node_id,
+                        total=shard.model_card.storage_size,
+                        model_directory=str(path.parent if path.is_file() else path),
+                    )
+                    await self._emit_status(completed)
+                    self._reset_progress_throttle(model_id)
             except Exception as e:
                 logger.error(f"Download failed for {model_id}: {e}")
                 self._reset_progress_throttle(model_id)

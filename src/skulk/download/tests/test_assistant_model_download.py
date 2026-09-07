@@ -51,7 +51,7 @@ def downloader() -> ResumableShardDownloader:
     return ResumableShardDownloader(max_parallel_downloads=4, offline=False)
 
 
-def _capture():
+def _capture(tmp_path: Path):
     calls: list[dict[str, Any]] = []
 
     async def fake_download_shard(
@@ -70,18 +70,19 @@ def _capture():
                 "allow_patterns": allow_patterns,
             }
         )
-        return Path("/tmp/x"), MagicMock()
+        (tmp_path / "config.json").write_text("{}")
+        return tmp_path, MagicMock(status="complete")
 
     return calls, fake_download_shard
 
 
 class TestAssistantModelDownload:
     async def test_downloads_assistant_when_configured(
-        self, downloader: ResumableShardDownloader
+        self, downloader: ResumableShardDownloader, tmp_path: Path
     ) -> None:
         card = _make_card(assistant_model_repo="test-org/test-assistant")
         shard = _make_shard(card)
-        calls, fake = _capture()
+        calls, fake = _capture(tmp_path)
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard", side_effect=fake
@@ -94,10 +95,10 @@ class TestAssistantModelDownload:
         assert assistant_calls[0]["allow_patterns"] == ["*.safetensors", "config.json"]
 
     async def test_skips_assistant_when_not_configured(
-        self, downloader: ResumableShardDownloader
+        self, downloader: ResumableShardDownloader, tmp_path: Path
     ) -> None:
         shard = _make_shard(_make_card())
-        calls, fake = _capture()
+        calls, fake = _capture(tmp_path)
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard", side_effect=fake
@@ -106,10 +107,10 @@ class TestAssistantModelDownload:
 
         assert [c for c in calls if "assistant" in c["model_id"]] == []
 
-    async def test_skips_assistant_in_offline_mode(self) -> None:
+    async def test_skips_assistant_in_offline_mode(self, tmp_path: Path) -> None:
         offline = ResumableShardDownloader(max_parallel_downloads=4, offline=True)
         shard = _make_shard(_make_card(assistant_model_repo="test-org/test-assistant"))
-        calls, fake = _capture()
+        calls, fake = _capture(tmp_path)
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard", side_effect=fake
@@ -119,10 +120,10 @@ class TestAssistantModelDownload:
         assert [c for c in calls if "assistant" in c["model_id"]] == []
 
     async def test_skips_assistant_in_config_only_mode(
-        self, downloader: ResumableShardDownloader
+        self, downloader: ResumableShardDownloader, tmp_path: Path
     ) -> None:
         shard = _make_shard(_make_card(assistant_model_repo="test-org/test-assistant"))
-        calls, fake = _capture()
+        calls, fake = _capture(tmp_path)
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard", side_effect=fake

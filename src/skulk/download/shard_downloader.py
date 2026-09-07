@@ -21,7 +21,9 @@ class ShardDownloader(ABC):
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
         """
-        Ensures that the shard is downloaded.
+        Ensure the shard's files and installed identity are ready for loading.
+        Return its path only after required finalization succeeds; raise on
+        failure. Transfer progress callbacks do not establish this guarantee.
         Does not allow multiple overlapping downloads at once.
         If you try to download a Shard which overlaps a Shard that is already being downloaded,
         the download will be cancelled and a new download will start.

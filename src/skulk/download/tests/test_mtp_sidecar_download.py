@@ -84,7 +84,8 @@ class TestMtpSidecarDownload:
                     "allow_patterns": allow_patterns,
                 }
             )
-            return tmp_path, MagicMock()
+            (tmp_path / "config.json").write_text("{}")
+            return tmp_path, MagicMock(status="complete")
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard",
@@ -117,7 +118,8 @@ class TestMtpSidecarDownload:
             capacity_preflight: Any = None,
         ) -> tuple[Path, Any]:
             download_calls.append({"model_id": str(shard.model_card.model_id)})
-            return tmp_path, MagicMock()
+            (tmp_path / "config.json").write_text("{}")
+            return tmp_path, MagicMock(status="complete")
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard",
@@ -149,7 +151,8 @@ class TestMtpSidecarDownload:
             capacity_preflight: Any = None,
         ) -> tuple[Path, Any]:
             download_calls.append({"model_id": str(shard.model_card.model_id)})
-            return tmp_path, MagicMock()
+            (tmp_path / "config.json").write_text("{}")
+            return tmp_path, MagicMock(status="complete")
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard",
@@ -180,7 +183,8 @@ class TestMtpSidecarDownload:
             capacity_preflight: Any = None,
         ) -> tuple[Path, Any]:
             download_calls.append({"model_id": str(shard.model_card.model_id)})
-            return tmp_path, MagicMock()
+            (tmp_path / "config.json").write_text("{}")
+            return tmp_path, MagicMock(status="complete")
 
         with patch(
             "skulk.download.impl_shard_downloader.download_shard",
