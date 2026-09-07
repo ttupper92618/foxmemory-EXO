@@ -46,9 +46,12 @@ a new compute node, proxy destination, or redirect.
 4. Retain the response's `command_id` and `instance_id`; correlate later state
    and terminal failures with the exact instance identity.
 
-The API validates the submitted model-card identities and current admission
-constraints. HTTP acceptance means the command was accepted; download and
-runner startup happen afterward. See the [placement API](api-guide.md#create-an-instance-from-a-fully-specified-placement)
+The exact-placement API checks model-card identity, code authorization, and
+aggregate available memory. It does not rerun every preview check for topology,
+per-node capacity or backend compatibility. A stale preview can therefore be
+accepted and fail asynchronously. HTTP acceptance means the command was accepted;
+continue reconciling the assigned nodes and terminal failure history while
+download and runner startup proceed. See the [placement API](api-guide.md#create-an-instance-from-a-fully-specified-placement)
 for the response and refusal contract.
 
 If the HTTP response is lost, inspect `GET /state` for the stored instance ID
@@ -64,9 +67,14 @@ placement succeeded.
 
 `GET /state` combines durable control state with the current telemetry overlay.
 Its `downloads` entries are tagged records grouped by node. Match the target
-node, immutable model card and shard coordinates: shard kind, layer interval,
-layer count, device rank and world size. Match the instance's assigned runner
-through `shardAssignments.nodeToRunner` and `runnerToShard`.
+node and immutable downloadable artifact: signed cards use `registryCardId`,
+while legacy/custom cards require full card equality. Download state is retained
+per node/model and may describe an earlier shard layout of the same cached
+artifact. A new runner can reuse that installation without emitting a new
+completion record, so layer, rank and world-size differences in a download
+record must not reject an otherwise matching artifact. Bind current execution
+to the instance's assigned runner and shard through
+`shardAssignments.nodeToRunner` and `runnerToShard`.
 
 | Evidence | What it establishes |
 | --- | --- |
