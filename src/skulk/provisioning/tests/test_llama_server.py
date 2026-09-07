@@ -2,6 +2,7 @@
 """Provisioning tests: variant selection, verification, wiring, overrides."""
 
 import hashlib
+import importlib.metadata
 import io
 import os
 import tarfile
@@ -572,6 +573,9 @@ def test_cuda_wheel_install_sanitizes_index_environment(
     # Config-file discovery (project pyproject.toml/uv.toml) is the other
     # index side channel; the install must opt out of it entirely.
     assert "--no-config" in seen_argv
+    pin = provisioning.LLAMA_SERVER_PIN.removeprefix("b")
+    minimum = provisioning.LLAMA_SERVER_CUDA_MIN_REVISION
+    assert f"skulk-llama-server-cuda==0.{pin}.*,>=0.{pin}.{minimum}" in seen_argv
 
 
 def test_cuda_wheel_install_degrades_when_uv_cannot_execute(
@@ -726,3 +730,26 @@ def test_install_success_requires_usable_wheel(
     monkeypatch.setattr(provisioning.shutil, "which", _fake_which)
     monkeypatch.setattr(provisioning, "_cuda_wheel_usable", _still_unusable)
     assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
+
+
+@pytest.mark.parametrize(
+    ("distribution", "installed", "accepted"),
+    [
+        ("skulk-llama-server-cuda", "0.10753.0", False),
+        ("skulk-llama-server-cuda", "0.10753.1", True),
+        ("skulk-llama-server-cuda", "0.10753.2", True),
+        ("skulk-llama-server-cuda", "0.10753.1rc1", False),
+        ("skulk-llama-server-cuda", "0.10754.1", False),
+        ("skulk-llama-server-cuda", "malformed", False),
+        ("skulk-llama-server-vulkan", "0.10753.0", True),
+    ],
+)
+def test_engine_selection_rejects_broken_cuda_revision(
+    monkeypatch: pytest.MonkeyPatch, distribution: str, installed: str, accepted: bool
+) -> None:
+    """An already installed old wheel must not bypass the corrected package floor."""
+    def version(name: str) -> str:
+        return installed
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    assert provisioning._wheel_version_matches_pin(distribution) is accepted

@@ -44,6 +44,13 @@ uv run ruff check
 nix fmt
 ```
 
+Managed CUDA engine wheels disable `GGML_NATIVE` to avoid inheriting CI-host CPU
+instructions. The CUDA wheel installs and resolves NVIDIA CUDA, cuBLAS and NCCL
+runtime libraries from their official Python packages.
+For a CUDA-only packaging revision, the engine-wheel workflow's
+`publish_variant=cuda` publishes both CUDA architectures while preserving the
+unchanged Vulkan package.
+
 `uv` is the canonical Skulk runtime path on macOS, including the official
 `mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based
 validation, and reproducible development shells; it should not silently swap
@@ -939,3 +946,7 @@ shielded cleanup budget after discovery withdrawal. CapabilityReadiness is an
 optional cached predicate covering discovery and new unary/stream admission.
 Management-only API nodes gossip capability tags and empty withdrawals alongside
 resource telemetry, without advertising inference backends.
+
+The engine manifest also sets `LLAMA_SERVER_CUDA_MIN_REVISION`; both installation
+and runtime selection enforce this packaging floor. Revisit it when advancing the
+engine pin; revision 1 for b10753 excludes the NCCL/CPU portability defects.

@@ -26,6 +26,11 @@ on:
         description: "Publish the wheels to the Foxlight R2 index"
         type: boolean
         default: false
+      publish_variant:
+        description: "Publish only the package family whose version was advanced"
+        type: choice
+        options: [all, cuda, vulkan]
+        default: all
   push:
     branches: [dev]
     paths:
@@ -107,6 +112,10 @@ jobs:
           grep -q 'skulk-llama-server-cuda==0.${ENGINE_BUILD}' install.sh
           grep -q 'skulk-llama-server-vulkan==0.${ENGINE_BUILD}' install.sh
           grep -q 'LLAMA_SERVER_PIN' install.sh
+          MIN_REV="$(grep -oE 'LLAMA_SERVER_CUDA_MIN_REVISION: Final = [0-9]+' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+')"
+          PACKAGE_REV="$(sed -n 's/^version = "0\.[0-9]*\.\([0-9]*\)"/\1/p' packaging/skulk-llama-server-cuda/pyproject.toml)"
+          test "$PACKAGE_REV" -ge "$MIN_REV"
+          grep -q 'LLAMA_SERVER_CUDA_MIN_REVISION' install.sh
 
       - name: Build llama-server (${{ matrix.variant }})
         run: |
@@ -123,7 +132,9 @@ jobs:
             # driver-API reference; llama-server commits its KV window up
             # front at a fixed -c, so the VMM pool allocator's benefit is
             # marginal for this serving shape.
-            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_architectures }} -DGGML_CUDA_NO_VMM=ON"
+            # CUDA wheels must not inherit the runner's CPU instruction set:
+            # a native AMX build can SIGILL during model load on a GPU host.
+            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_architectures }} -DGGML_CUDA_NO_VMM=ON -DGGML_NATIVE=OFF"
           else
             BACKEND_FLAGS="-DGGML_VULKAN=ON"
           fi
@@ -211,6 +222,16 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          PUBLISH_VARIANT: ${{ inputs.publish_variant || 'all' }}
         run: |
           set -euo pipefail
-          uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/*.whl
+          # Packaging-only CUDA revisions must not overwrite the existing Vulkan
+          # version with newly rebuilt bytes. All architectures of the selected
+          # package still publish together from this attested workflow run.
+          case "$PUBLISH_VARIANT" in
+            all) WHEEL_PREFIX=skulk_llama_server_ ;;
+            cuda) WHEEL_PREFIX=skulk_llama_server_cuda- ;;
+            vulkan) WHEEL_PREFIX=skulk_llama_server_vulkan- ;;
+            *) echo "unsupported publication variant" >&2; exit 1 ;;
+          esac
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/"$WHEEL_PREFIX"*.whl

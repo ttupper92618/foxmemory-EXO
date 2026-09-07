@@ -23,7 +23,7 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _BIN_DIR = _PACKAGE_DIR / "bin"
 
 #: NVIDIA namespace packages whose lib/ dirs the binary needs at exec time.
-_NVIDIA_LIB_PACKAGES = ("nvidia.cuda_runtime", "nvidia.cublas")
+_NVIDIA_LIB_PACKAGES = ("nvidia.cuda_runtime", "nvidia.cublas", "nvidia.nccl")
 
 
 def binary_path() -> Path:
