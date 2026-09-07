@@ -90,6 +90,7 @@ class Election:
 
         # Campaign state
         self._candidates: list[ElectionMessage] = []
+        self._completed_election: ElectionMessage | None = None
         self._campaign_cancel_scope: CancelScope | None = None
         self._campaign_done: Event | None = None
         # Live connection count per peer. A multi-homed peer holds several
@@ -128,9 +129,11 @@ class Election:
             logger.info("Election shutdown")
 
     async def elect(self, em: ElectionMessage) -> None:
+        """Publish the selected session and retain its vote for late-round repair."""
         logger.debug(f"Electing: {em}")
         is_new_master = em.proposed_session != self.current_session
         self.current_session = em.proposed_session
+        self._completed_election = em
         logger.debug(f"Current session: {self.current_session}")
         await self._er_sender.send(
             ElectionResult(
@@ -181,6 +184,18 @@ class Election:
                 logger.debug(f"Election added candidate {message}")
                 # Now we are processing this rounds messages - including the message that triggered this round.
                 self._candidates.append(message)
+                completed = self._completed_election
+                if (
+                    completed is not None
+                    and completed.clock == message.clock
+                    and completed < message
+                ):
+                    # Subscription readiness and network latency can deliver a
+                    # same-round vote after our timeout. A healthy connection
+                    # then produces no new membership event to repair two
+                    # conflicting masters. Compare the completed vote, not our
+                    # post-win seniority, and monotonically adopt a better vote.
+                    await self.elect(message)
 
     def _apply_connection_updates(self, updates: list[ConnectionMessage]) -> bool:
         """Fold connection updates into the per-peer live-connection counts.
