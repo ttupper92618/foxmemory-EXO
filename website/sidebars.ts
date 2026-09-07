@@ -38,6 +38,7 @@ const sidebars: SidebarsConfig = {
         "model-capabilities",
         "operations",
         "extensions",
+        "controller-integration",
         "run-skulk-as-a-service",
         "thunderbolt-clustering",
         {

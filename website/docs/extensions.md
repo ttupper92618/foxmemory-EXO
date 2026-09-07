@@ -509,6 +509,11 @@ was refused (with the reason).
 
 ## Operational notes
 
+For a separately installed controller that acquires compute capacity, see
+[Controller integration](controller-integration.md) for the existing HTTP API
+workflow: identity, two-way membership, exact placement, download and runner
+readiness, and independent resource cleanup.
+
 - **Install on every node.** Chat middleware runs on the API node that owns
   the request, and any node can serve API traffic, so install extensions
   fleet-wide (the same discipline as Skulk versions).
