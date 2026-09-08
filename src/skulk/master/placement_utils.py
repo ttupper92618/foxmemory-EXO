@@ -5,13 +5,16 @@ from typing import Final, final
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
     UMA_GPU_OS_HEADROOM,
     backend_offloads_to_vram,
+    estimate_recurrent_cache_bytes,
     estimate_shard_footprint,
     memory_overhead_factor,
+    per_token_kv_bytes,
     shard_fraction_of_model,
 )
 from skulk.shared.models.memory_estimate import (
@@ -247,6 +250,8 @@ def reserve_instance_vram(
             footprint = estimate_shard_footprint(
                 shard.model_card,
                 fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
                 context_budget=(
                     instance.context_token_limit
                     if instance.context_token_limit is not None
@@ -458,6 +463,8 @@ def filter_cycles_by_memory(
     *,
     exact_pipeline_layers: bool = True,
     fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
+    resolved_backends: Mapping[NodeId, str | None] | None = None,
+    llama_server_settings: Mapping[NodeId, LlamaServerSettings | None] | None = None,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -559,10 +566,37 @@ def filter_cycles_by_memory(
         overhead_factor = memory_overhead_factor(model_card)
         overloaded: list[str] = []
         for node_id, share in node_shares.items():
-            kv_share = share * kv_ratio
+            backend = (resolved_backends or {}).get(node_id)
+            settings = (llama_server_settings or {}).get(node_id)
+            node_kv_ratio = kv_ratio
+            recurrent_share = Memory()
+            if model_card.gguf_cache_geometry is not None:
+                if (
+                    backend is not None
+                    and backend.startswith("llama_server")
+                    and settings is None
+                ):
+                    overloaded.append(
+                        f"node {node_id} has no observed llama-server serving settings"
+                    )
+                    continue
+                node_kv_ratio = (
+                    per_token_kv_bytes(
+                        model_card,
+                        resolved_backend=backend,
+                        llama_server_settings=settings,
+                    )
+                    * context_budget
+                    / required_memory.in_bytes
+                )
+                recurrent_share = estimate_recurrent_cache_bytes(
+                    model_card, resolved_backend=backend, llama_server_settings=settings
+                ) * (share.in_bytes / required_memory.in_bytes)
+            kv_share = share * node_kv_ratio
             required_with_overhead = (
                 share * overhead_factor
                 + kv_share
+                + recurrent_share
                 + PLACEMENT_MEMORY_OVERHEAD_FLOOR
                 + fixed_memory_by_node.get(node_id, Memory())
             )

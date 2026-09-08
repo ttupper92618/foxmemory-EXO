@@ -108,6 +108,16 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 
 ### Node Composition
 
+GGUF hybrid cache admission uses `ModelCard.gguf_cache_geometry` from the exact
+artifact header. Qwen3.5 scalar metadata separates attention, recurrent and NextN
+layers; recurrent FP32 buffers scale with slots and speculative rollback rows.
+NodeResources advertises `llama_server_settings`, placement stamps them on shards,
+and the runner refuses changed local settings before spawning. Registry geometry
+is explicitly derived from the separately signed `v1/gguf-metadata.json` target,
+bound to the catalog snapshot, signed role version and exact artifact. Canonical
+cards remain unchanged for older clients. Runtime cards retain the header evidence
+in `registry_gguf_metadata`; it participates in the full-card approval digest.
+
 Exact non-RPC placements resolve omitted backends from advertised compatible
 engines before memory admission; restored unstamped GPU-host shards reserve
 conservatively. Exact and quick-launch master refusals retain correlated instance

@@ -561,6 +561,24 @@ The mounted model must also declare `TextGeneration`; speech-only cards return
 
 ### Context-length limits
 
+GGUF cards may include `gguf_cache_geometry`, derived from the selected artifact's
+header, to distinguish per-token attention cache from fixed recurrent state.
+Registry-backed runtime cards also expose `registry_gguf_metadata`, the separately
+signed exact-file header evidence used for this projection. It names the repository,
+immutable revision, selected file, architecture, scalar dimensions, inspected-prefix
+length and digest, and any recurrent-layer override. This is not a whole-weight
+checksum. Skulk verifies its catalog snapshot and signed target version before use;
+canonical card IDs remain unchanged, but a changed runtime projection changes the
+full-card approval digest. Older installed metadata for the same canonical card
+does not override the current verified projection.
+For supported hybrid layouts, memory requirements include FP32 recurrent buffers
+for each serving slot and speculative rollback row. Embedded MTP adds its own
+attention layers without charging a second copy of the target weights.
+`NodeResources.llama_server_settings` reports the slot count and speculation
+override; placement captures those settings on each served shard. A settings
+change requires a new placement before the runner can start. Missing geometry
+retains the legacy estimate and is not proof that recurrent state costs zero.
+
 Ordinary text requests prefer ready or running placements over placements still
 loading. Among equally ready placements, ordinary model instances take precedence
 over the resident steward, then active text-task counts balance requests. Retained

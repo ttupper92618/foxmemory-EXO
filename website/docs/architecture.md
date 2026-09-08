@@ -293,6 +293,25 @@ A snapshot-bootstrap rollout has one operational rule: once a master starts comp
 
 ### Heterogeneous nodes and capability-aware placement
 
+GGUF memory admission separates artifact geometry from node serving settings.
+The selected header supplies attention and recurrent dimensions through
+`GgufCacheGeometry`; generated cards use those artifact dimensions even when a
+repository config describes a different base-layer count. For the supported
+Qwen3.5 scalar layout, admission charges FP32 recurrent state across configured
+slots and rollback rows, plus the target and embedded-MTP attention caches.
+`NodeResources.llama_server_settings` advertises the existing environment
+controls, and placement stamps them into shard metadata. The runner rejects a
+changed stamp before launch. For registry models, the TUF client reads the separate
+`v1/gguf-metadata.json` target from the same verified metadata refresh. Its target
+version, catalog snapshot, card ID and exact artifact must match before header
+facts become runtime geometry. The canonical catalog and card bytes are unchanged,
+so older readers can ignore the auxiliary target. Runtime cards retain the exact
+header evidence in `registry_gguf_metadata`; supported header dimensions correct
+base-config counts that omit NextN blocks. This projection participates in the
+full-card authorization digest, so changed geometry cannot reuse a different
+approved memory contract. Bounded hash- and snapshot-bound cached evidence survives
+temporary registry outages; mismatched or corrupted cache pairs are rejected.
+
 A cluster can mix node types: Apple Silicon nodes serving MLX models and
 non-Mac (for example AMD/Linux) nodes serving GGUF models through llama.cpp.
 Placement is capability-aware so each model runs only where it can.

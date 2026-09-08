@@ -12,6 +12,19 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **GGUF cache admission:** `shared/models/gguf_memory.py` resolves Qwen3.5 scalar
+  header geometry into fixed FP32 recurrent state and per-token FP16 attention
+  widths. `ModelCard.gguf_cache_geometry` is artifact metadata; unknown layouts
+  remain unknown. `NodeResources.llama_server_settings` carries configured slots
+  and speculation enablement. Placement copies it to served shard metadata;
+  `memory_estimate.py` charges rollback rows separately from weights/KV, and the
+  llama-server runner rejects local settings that differ from the stamp.
+  `registry_gguf_metadata.py` defines the separate signed header target.
+  `TufRegistryClient` binds it to the same catalog snapshot and targets-role
+  version. `registry_model_cards` retains the exact-file evidence as
+  `ModelCard.registry_gguf_metadata` and projects supported structural dimensions;
+  canonical cards are unchanged and full-card approvals bind the projection.
+
 ### Master
 
 - **Role:** elects + acts as cluster coordinator; indexes events; plans instance placements; publishes snapshots

@@ -29,6 +29,7 @@ from skulk.shared.models.registry import (
     RegistryUnavailableError,
     TufRegistryClient,
 )
+from skulk.shared.models.registry_gguf_metadata import RegistryGgufMetadata
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata
@@ -832,8 +833,8 @@ def test_client_uses_hash_bound_last_known_good(
         def refresh(self) -> None:
             pass
 
-        def get_targetinfo(self, _: str) -> object:
-            return object()
+        def get_targetinfo(self, target_path: str) -> object | None:
+            return object() if target_path == "v1/catalog.json" else None
 
         def download_target(self, _: object) -> str:
             return str(payload_path)
@@ -1439,3 +1440,177 @@ async def test_downloader_fetches_source_repository_under_alias_directory(
 
     assert observed == [ModelId("org/multi")]
     assert path.name == "org--multi@q4"
+
+
+def _gguf_metadata_payload() -> bytes:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "snapshot_id": "snapshot_1_test",
+            "target_version": 7,
+            "generated_at": "2026-09-08T00:00:00Z",
+            "artifacts": {
+                f"card_{'a' * 52}": {
+                    "repository": "org/multi-gguf",
+                    "revision": "b" * 40,
+                    "selected_file": "model-Q4_K_M.gguf",
+                    "header": {
+                        "architecture": "qwen35",
+                        "scalars": {
+                            "block_count": 33,
+                            "embedding_length": 4096,
+                            "attention.head_count_kv": 4,
+                            "attention.key_length": 256,
+                            "attention.value_length": 256,
+                            "ssm.conv_kernel": 4,
+                            "ssm.inner_size": 4096,
+                            "ssm.state_size": 128,
+                            "ssm.group_count": 16,
+                            "nextn_predict_layers": 1,
+                        },
+                        "has_recurrent_layer_override": False,
+                        "metadata_sha256": "c" * 64,
+                        "metadata_bytes": 10943341,
+                    },
+                }
+            },
+        }
+    ).encode()
+
+
+def test_signed_header_projects_geometry_without_changing_canonical_card() -> None:
+    """Auxiliary artifact facts correct runtime dimensions and bind approvals."""
+    original = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    metadata = RegistryGgufMetadata.model_validate_json(_gguf_metadata_payload())
+    catalog = original.with_gguf_metadata(metadata)
+    assert original.gguf_metadata is None
+    assert catalog.model_dump_json() == original.model_dump_json()
+    card = registry_model_cards(catalog)[0]
+    assert card.registry_card_id == original.cards[0].card_id
+    assert original.cards[0].card["n_layers"] == 4
+    assert card.n_layers == 33
+    assert card.hidden_size == 4096
+    assert card.gguf_cache_geometry is not None
+    assert (
+        card.gguf_cache_geometry.recurrent_bytes(parallel_slots=16, rollback_depth=3)
+        == 3372220416
+    )
+    assert card.registry_gguf_metadata is not None
+    restored = ModelCard.model_validate_json(card.model_dump_json())
+    assert restored == card
+    assert model_cards_module.authorized_model_card_digest(
+        card
+    ) != model_cards_module.authorized_model_card_digest(
+        registry_model_cards(original)[0]
+    )
+
+
+@pytest.mark.parametrize("field", ["repository", "revision", "selected_file"])
+def test_header_metadata_rejects_cross_artifact_binding(field: str) -> None:
+    """A same-name artifact or copied card ID cannot supply another file's geometry."""
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    metadata = RegistryGgufMetadata.model_validate_json(_gguf_metadata_payload())
+    key = catalog.cards[0].card_id
+    changed = metadata.artifacts[key].model_copy(
+        update={field: "d" * 40 if field == "revision" else "other/file"}
+    )
+    with pytest.raises(ValueError, match="artifact identity mismatch"):
+        catalog.with_gguf_metadata(
+            metadata.model_copy(update={"artifacts": {key: changed}})
+        )
+
+
+def test_header_metadata_rejects_cross_snapshot_and_numeric_coercion() -> None:
+    """Even signed metadata must match the exact snapshot and strict scalar types."""
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    metadata = RegistryGgufMetadata.model_validate_json(_gguf_metadata_payload())
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        catalog.with_gguf_metadata(metadata.model_copy(update={"snapshot_id": "other"}))
+    payload = _gguf_metadata_payload().replace(
+        b'"block_count": 33', b'"block_count": true'
+    )
+    with pytest.raises(ValueError):
+        RegistryGgufMetadata.model_validate_json(payload)
+
+
+def test_client_recovers_snapshot_bound_header_cache_and_rejects_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Network loss retains verified dimensions, while bad auxiliary bytes fail closed."""
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_bytes(_catalog_payload())
+    header_path = tmp_path / "gguf-metadata.json"
+    header_path.write_bytes(_gguf_metadata_payload())
+    root = tmp_path / "root.json"
+    root.write_text("{}")
+    offline = False
+
+    class MetadataUpdater:
+        def __init__(self, **kwargs: object) -> None:
+            self.metadata_dir = Path(cast("str", kwargs["metadata_dir"]))
+
+        def refresh(self) -> None:
+            if offline:
+                raise OSError("offline")
+            (self.metadata_dir / "targets.json").write_text('{"signed":{"version":7}}')
+
+        def get_targetinfo(self, path: str) -> str:
+            return str(header_path if path == "v1/gguf-metadata.json" else catalog_path)
+
+        def download_target(self, target: str) -> str:
+            return target
+
+    monkeypatch.setattr(registry_module, "Updater", MetadataUpdater)
+    client = TufRegistryClient(
+        base_url="https://registry.example/",
+        cache_dir=tmp_path / "cache",
+        embedded_root=root,
+        timeout_seconds=1,
+        max_stale_days=30,
+    )
+    first = client.load_catalog(registry_model_cards)
+    assert first.gguf_metadata is not None
+    # A rejected newer target cannot displace previously verified facts.
+    header_path.write_bytes(
+        _gguf_metadata_payload().replace(b'"target_version": 7', b'"target_version": 8')
+    )
+    assert (
+        client.load_catalog(registry_model_cards).gguf_metadata == first.gguf_metadata
+    )
+    offline = True
+    recovered = client.load_catalog(registry_model_cards)
+    assert registry_model_cards(recovered)[0] == registry_model_cards(first)[0]
+    (tmp_path / "cache/last-known-good-gguf-metadata.json").write_text("tampered")
+    with pytest.raises(RegistryUnavailableError):
+        client.load_catalog(registry_model_cards)
+
+
+def test_installed_same_card_keeps_current_signed_geometry(tmp_path: Path) -> None:
+    """An older installed sidecar cannot hide newly verified same-artifact metadata."""
+    original = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    metadata = RegistryGgufMetadata.model_validate_json(_gguf_metadata_payload())
+    old_card = registry_model_cards(original)[0]
+    current = registry_model_cards(original.with_gguf_metadata(metadata))[0]
+    (tmp_path / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    (tmp_path / ".skulk-source-revision").write_text(f"{old_card.source_revision}\n")
+    record = build_installed_card_record(tmp_path, old_card)
+    assert record.verification == "registry_verified"
+    prior_cache = dict(model_cards_module._card_cache)
+    prior_current = dict(model_cards_module._registry_current_cards)
+    prior_installed = dict(model_cards_module._installed_card_cache)
+    prior_current_ids = dict(model_cards_module._installed_current_registry_ids)
+    try:
+        model_cards_module._card_cache[current.model_id] = current
+        model_cards_module._registry_current_cards[current.model_id] = current
+        model_cards_module._apply_installed_card_snapshot([record], scan_version=10**9)
+        assert model_cards_module._card_cache[current.model_id] == current
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(prior_cache)
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(prior_current)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(prior_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(prior_current_ids)

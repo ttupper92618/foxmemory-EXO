@@ -9,6 +9,10 @@ from typing import Literal, Self, cast, final
 import psutil
 from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 
+from skulk.shared.models.llama_server_settings import (
+    LlamaServerSettings,
+    resolve_llama_server_settings,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.node_facts import CapabilityConflict
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
@@ -313,6 +317,10 @@ class NodeResources(CamelCaseModel):
         default_factory=dict,
         description="Exact installed build identities keyed by engine and backend tag.",
     )
+    llama_server_settings: LlamaServerSettings | None = Field(
+        default=None,
+        description="Observed serving controls needed to budget per-slot recurrent state.",
+    )
     hardware_classes: frozenset[str] = Field(
         default_factory=frozenset,
         description="Open observed hardware identifiers for support constraints.",
@@ -425,6 +433,14 @@ class NodeResources(CamelCaseModel):
         return cls(
             backends=derivation.backends,
             engine_builds=engine_builds,
+            llama_server_settings=(
+                resolve_llama_server_settings(os.environ)
+                if any(
+                    backend.startswith("llama_server")
+                    for backend in derivation.backends
+                )
+                else None
+            ),
             hardware_classes=hardware_class_inventory(facts),
             participation=participation,
             api_available=api_available,

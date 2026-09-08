@@ -920,6 +920,8 @@ class Worker:
             shard.model_card,
             self._shard_memory_fraction(shard),
             context_budget=kv_context,
+            resolved_backend=shard.resolved_backend,
+            llama_server_settings=shard.llama_server_settings,
         )
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
