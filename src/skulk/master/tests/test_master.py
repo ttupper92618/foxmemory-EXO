@@ -36,6 +36,7 @@ from skulk.shared.types.events import (
     InstanceCreated,
     LocalForwarderEvent,
     NodeGatheredInfo,
+    RunnerStatusUpdated,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -59,6 +60,7 @@ from skulk.shared.types.worker.instances import (
     MlxRingInstance,
     ShardAssignments,
 )
+from skulk.shared.types.worker.runners import RunnerIdle
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
 from skulk.utils.info_gatherer.info_gatherer import NodeNetworkInterfaces
@@ -317,6 +319,16 @@ async def test_master():
         logger.info("wait for an instance")
         while len(master.state.instances.keys()) == 0:
             await anyio.sleep(0.001)
+        # A mock worker publishes its initial status before accepting queued work.
+        # Missing status can also mean a terminal runner has already been pruned.
+        instance = next(iter(master.state.instances.values()))
+        initial_runner = next(iter(instance.shard_assignments.runner_to_shard))
+        await local_event_sender.send(LocalForwarderEvent(
+            origin_idx=1, origin=SystemId("Worker"), session=session_id,
+            event=RunnerStatusUpdated(runner_id=initial_runner, runner_status=RunnerIdle()),
+        ))
+        while initial_runner not in master.state.runners:
+            await anyio.sleep(0.001)
         logger.info("inject a TextGeneration Command")
         await command_sender.send(
             ForwarderCommand(
@@ -334,14 +346,16 @@ async def test_master():
                 ),
             )
         )
-        while len(_get_events()) < 3:
+        while len(_get_events()) < 4:
             await anyio.sleep(0.01)
 
         events = _get_events()
-        assert len(events) == 3
+        assert len(events) == 4
         assert events[0].idx == 0
         assert events[1].idx == 1
         assert events[2].idx == 2
+        assert isinstance(events[2].event, RunnerStatusUpdated)
+        assert events[3].idx == 3
         assert isinstance(events[0].event, NodeGatheredInfo)
         assert isinstance(events[1].event, InstanceCreated)
         created_instance = events[1].event.instance
@@ -376,10 +390,10 @@ async def test_master():
         assert len(created_instance.hosts_by_node[node_id]) == 1
         assert created_instance.hosts_by_node[node_id][0].ip == "0.0.0.0"
         assert created_instance.ephemeral_port > 0
-        assert isinstance(events[2].event, TaskCreated)
-        assert events[2].event.task.task_status == TaskStatus.Pending
-        assert isinstance(events[2].event.task, TextGenerationTask)
-        assert events[2].event.task.task_params == TextGenerationTaskParams(
+        assert isinstance(events[3].event, TaskCreated)
+        assert events[3].event.task.task_status == TaskStatus.Pending
+        assert isinstance(events[3].event.task, TextGenerationTask)
+        assert events[3].event.task.task_params == TextGenerationTaskParams(
             model=ModelId("llama-3.2-1b"),
             input=[InputMessage(role="user", content="Hello, how are you?")],
         )

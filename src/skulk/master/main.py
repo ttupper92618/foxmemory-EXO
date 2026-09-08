@@ -703,7 +703,8 @@ def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceI
     """Rank viable text placements by readiness, ordinary role and active load.
 
     A failed or shutting-down rank cannot execute queued work. Keep cold placements
-    eligible only behind ready capacity, and do not divert ordinary requests into
+    eligible only after their initial runner status arrives and behind ready
+    capacity, and do not divert ordinary requests into
     a resident steward when an ordinary placement is ready. Completed lifecycle
     tasks are retained state, not outstanding inference load.
     """
@@ -714,7 +715,8 @@ def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceI
             continue
         statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
         if any(
-            isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
             for status in statuses
         ):
             continue

@@ -5,6 +5,7 @@ import pytest
 
 from skulk.master.main import Master, text_generation_instances
 from skulk.routing.router import get_node_id_keypair
+from skulk.shared.apply import event_apply
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.types.commands import (
     CommandId,
@@ -17,6 +18,7 @@ from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     LocalForwarderEvent,
+    RunnerStatusUpdated,
     TaskCreated,
     TaskFailed,
 )
@@ -227,3 +229,29 @@ async def test_cold_explicit_pin_keeps_its_target() -> None:
     assert isinstance(events[0], TaskCreated)
     assert events[0].task.instance_id == InstanceId("steward")
     assert events[0].task.task_status == TaskStatus.Pending
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_pruned_shutdown_status_cannot_receive_more_work(pinned: bool) -> None:
+    """Use real shutdown reduction: instance survives after its status is pruned."""
+    state = event_apply(
+        RunnerStatusUpdated(
+            runner_id=RunnerId("steward-runner"), runner_status=RunnerShutdown()
+        ),
+        _state(RunnerReady(), RunnerFailed()),
+    )
+    assert RunnerId("steward-runner") not in state.runners
+    assert InstanceId("steward") in state.instances
+    events = await _dispatch(
+        state, InstanceId("steward") if pinned else None, failed=True
+    )
+    assert isinstance(events[0], TaskCreated)
+    assert events[0].task.task_status == TaskStatus.Failed
+    assert isinstance(events[1], TaskFailed)
+
+
+async def test_initially_unobserved_rank_is_unavailable() -> None:
+    """An assignment alone is insufficient evidence that a runner can accept work."""
+    state = _state(RunnerReady(), RunnerReady()).model_copy(update={"runners": {}})
+    events = await _dispatch(state, None, failed=True)
+    assert isinstance(events[1], TaskFailed)

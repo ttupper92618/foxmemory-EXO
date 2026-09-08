@@ -565,7 +565,8 @@ Ordinary text requests prefer ready or running placements over placements still
 loading. Among equally ready placements, ordinary model instances take precedence
 over the resident steward, then active text-task counts balance requests. Retained
 completed tasks do not count as load. A placement with any failed or shutting-down
-runner is unavailable. Explicit steward/canary pins never fall back to a sibling;
+runner, or without an initial status for every rank, is unavailable. Explicit
+steward/canary pins never fall back to a sibling;
 an unavailable pin or a model with no viable placement emits `instance_unavailable`
 for the correlated task instead of leaving the request queued indefinitely.
 
