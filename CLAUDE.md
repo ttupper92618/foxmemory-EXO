@@ -113,7 +113,10 @@ artifact header. Qwen3.5 scalar metadata separates attention, recurrent and Next
 layers; recurrent FP32 buffers scale with slots and speculative rollback rows.
 NodeResources advertises `llama_server_settings`, placement stamps them on shards,
 and the runner refuses changed local settings before spawning. Registry geometry
-must enter through a new signed card revision, never a silent runtime overlay.
+is explicitly derived from the separately signed `v1/gguf-metadata.json` target,
+bound to the catalog snapshot, signed role version and exact artifact. Canonical
+cards remain unchanged for older clients. Runtime cards retain the header evidence
+in `registry_gguf_metadata`; it participates in the full-card approval digest.
 
 Exact non-RPC placements resolve omitted backends from advertised compatible
 engines before memory admission; restored unstamped GPU-host shards reserve

@@ -19,6 +19,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   and speculation enablement. Placement copies it to served shard metadata;
   `memory_estimate.py` charges rollback rows separately from weights/KV, and the
   llama-server runner rejects local settings that differ from the stamp.
+  `registry_gguf_metadata.py` defines the separate signed header target.
+  `TufRegistryClient` binds it to the same catalog snapshot and targets-role
+  version. `registry_model_cards` retains the exact-file evidence as
+  `ModelCard.registry_gguf_metadata` and projects supported structural dimensions;
+  canonical cards are unchanged and full-card approvals bind the projection.
 
 ### Master
 

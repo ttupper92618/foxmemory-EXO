@@ -8,9 +8,18 @@ from pathlib import Path
 from typing import Any, Literal, Self, cast
 
 from filelock import FileLock
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 from tuf.ngclient.updater import Updater
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
+
+from skulk.shared.models.registry_gguf_metadata import RegistryGgufMetadata
 
 EMBEDDED_REGISTRY_ROOT = Path(__file__).with_name("model_registry_root.json")
 """Public TUF trust root shipped inside the Skulk Python package."""
@@ -291,6 +300,31 @@ class RegistryCatalog(BaseModel):
     note: str
     cards: tuple[RegistryCard, ...]
     card_metadata: dict[str, RegistryCardMetadata]
+    _gguf_metadata: RegistryGgufMetadata | None = PrivateAttr(default=None)
+
+    @property
+    def gguf_metadata(self) -> RegistryGgufMetadata | None:
+        """Return separately verified header facts, never an inline catalog field."""
+        return self._gguf_metadata
+
+    def with_gguf_metadata(self, metadata: RegistryGgufMetadata | None) -> Self:
+        """Bind auxiliary evidence without modifying canonical catalog bytes."""
+        if metadata is not None:
+            if metadata.snapshot_id != self.snapshot_id:
+                raise ValueError("GGUF metadata catalog snapshot mismatch")
+            cards = {card.card_id: card for card in self.cards}
+            for card_id, entry in metadata.artifacts.items():
+                card = cards.get(card_id)
+                if card is None or (
+                    card.artifact.format != "gguf"
+                    or entry.repository != card.artifact.repository
+                    or entry.revision != card.artifact.revision
+                    or entry.selected_file != card.artifact.selected_file
+                ):
+                    raise ValueError("GGUF metadata artifact identity mismatch")
+        copied = self.model_copy()
+        copied._gguf_metadata = metadata
+        return copied
 
 
 class RegistryAdvisory(BaseModel):
@@ -559,6 +593,8 @@ class TufRegistryClient:
         self._targets_dir = cache_dir / "targets"
         self._last_known_good_path = cache_dir / "last-known-good-catalog.json"
         self._cache_record_path = cache_dir / "last-known-good.json"
+        self._gguf_metadata_path = cache_dir / "last-known-good-gguf-metadata.json"
+        self._gguf_cache_record_path = cache_dir / "last-known-good-gguf-record.json"
         self._last_known_good_advisories_path = (
             cache_dir / "last-known-good-advisories.json"
         )
@@ -739,10 +775,66 @@ class TufRegistryClient:
         downloaded = Path(updater.download_target(target))
         payload = downloaded.read_bytes()
         catalog = RegistryCatalog.model_validate_json(payload, strict=False)
+        gguf_target = updater.get_targetinfo("v1/gguf-metadata.json")
+        gguf_metadata: RegistryGgufMetadata | None = None
+        if gguf_target is not None:
+            gguf_metadata = RegistryGgufMetadata.model_validate_json(
+                Path(updater.download_target(gguf_target)).read_bytes()
+            )
+            trusted_targets = _TrustedTargetsMetadataVersion.model_validate_json(
+                (self._metadata_dir / "targets.json").read_bytes(), strict=False
+            )
+            if gguf_metadata.target_version != trusted_targets.signed.version:
+                raise ValueError("GGUF metadata version does not match signed targets")
+        catalog = catalog.with_gguf_metadata(gguf_metadata)
         if catalog_validator is not None:
             catalog_validator(catalog)
+        self._write_verified_gguf_cache(catalog)
         self._write_verified_cache(payload, catalog)
         return catalog
+
+    def _write_verified_gguf_cache(self, catalog: RegistryCatalog) -> None:
+        """Retain a hash-bound auxiliary projection without changing old cache schemas."""
+        payload = (
+            catalog.gguf_metadata.model_dump_json().encode()
+            if catalog.gguf_metadata is not None
+            else b"null"
+        )
+        record = _VerifiedCacheRecord(
+            sha256=hashlib.sha256(payload).hexdigest(),
+            verified_at=datetime.now(UTC),
+            snapshot_id=catalog.snapshot_id,
+        )
+        self._atomic_write(self._gguf_metadata_path, payload)
+        self._atomic_write(
+            self._gguf_cache_record_path, record.model_dump_json().encode()
+        )
+
+    def _attach_cached_gguf_metadata(self, catalog: RegistryCatalog) -> RegistryCatalog:
+        """Recover only auxiliary facts tied to this exact cached catalog."""
+        if (
+            not self._gguf_cache_record_path.exists()
+            and not self._gguf_metadata_path.exists()
+        ):
+            # A cache created by an older reader has no auxiliary evidence.
+            return catalog
+        record = _VerifiedCacheRecord.model_validate_json(
+            self._gguf_cache_record_path.read_bytes(), strict=False
+        )
+        if record.snapshot_id != catalog.snapshot_id:
+            raise ValueError("cached GGUF metadata snapshot mismatch")
+        if datetime.now(UTC) - record.verified_at.astimezone(UTC) > timedelta(
+            days=self._max_stale_days
+        ):
+            raise ValueError("cached GGUF metadata is too old")
+        payload = self._gguf_metadata_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != record.sha256:
+            raise ValueError("cached GGUF metadata hash mismatch")
+        return catalog.with_gguf_metadata(
+            None
+            if payload == b"null"
+            else RegistryGgufMetadata.model_validate_json(payload)
+        )
 
     def _write_verified_cache(self, payload: bytes, catalog: RegistryCatalog) -> None:
         """Atomically retain bytes that the updater just verified."""
@@ -805,6 +897,7 @@ class TufRegistryClient:
         catalog = RegistryCatalog.model_validate_json(payload, strict=False)
         if catalog.snapshot_id != record.snapshot_id:
             raise ValueError("last-known-good snapshot identity mismatch")
+        catalog = self._attach_cached_gguf_metadata(catalog)
         if catalog_validator is not None:
             catalog_validator(catalog)
         return catalog

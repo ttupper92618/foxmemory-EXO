@@ -54,6 +54,7 @@ from skulk.shared.models.registry import (
     RegistryEngineSupportClaim,
     TufRegistryClient,
 )
+from skulk.shared.models.registry_gguf_metadata import RegistryGgufArtifactMetadata
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
@@ -198,6 +199,28 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 "is_custom": False,
             }
         )
+        header_evidence = (
+            catalog.gguf_metadata.artifacts.get(envelope.card_id)
+            if catalog.gguf_metadata is not None
+            else None
+        )
+        payload["registry_gguf_metadata"] = header_evidence
+        if header_evidence is not None:
+            header = header_evidence.header
+            geometry = qwen35_cache_geometry(
+                header.architecture,
+                header.scalars,
+                has_recurrent_layer_override=header.has_recurrent_layer_override,
+            )
+            payload["gguf_cache_geometry"] = geometry
+            if geometry is not None:
+                # Repository config can omit an embedded NextN block. Exact
+                # signed header facts govern this runtime projection, while
+                # canonical card bytes and their content-derived ID stay intact.
+                payload["n_layers"] = header.scalars["block_count"]
+                if "embedding_length" in header.scalars:
+                    payload["hidden_size"] = header.scalars["embedding_length"]
+                payload["num_key_value_heads"] = header.scalars["attention.head_count_kv"]
         card = ModelCard.model_validate(payload)
         envelope_bundle = envelope.artifact.bundle
         card_bundle = card.artifact_bundle
@@ -1909,8 +1932,8 @@ class ModelCard(CamelCaseModel):
 
     This is intrinsic model metadata. Slot count, speculation and runtime buffer
     overhead are separate engine inputs. An absent value means unknown, never
-    zero recurrent cost; registry cards require a newly signed metadata revision
-    to add it without changing their accepted identity silently.
+    zero recurrent cost. Registry geometry is an explicit projection of the
+    separately signed header target retained in ``registry_gguf_metadata``.
     """
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
@@ -2058,6 +2081,38 @@ class ModelCard(CamelCaseModel):
     """Exact signed artifact format used for support-matrix joins."""
     registry_capability_claims: tuple[RegistryCapabilityClaim, ...] = ()
     """Open signed model/artifact capability claims, independent of engines."""
+    registry_gguf_metadata: RegistryGgufArtifactMetadata | None = None
+    """Exact signed header evidence used for this runtime geometry projection.
+
+    It participates in the full-card authorization digest. A changed projection
+    cannot silently reuse an approval for a different memory contract.
+    """
+
+    @model_validator(mode="after")
+    def _validate_registry_gguf_metadata(self) -> "ModelCard":
+        """Keep retained signed header evidence and derived runtime geometry bound."""
+        evidence = self.registry_gguf_metadata
+        if evidence is None:
+            return self
+        if (
+            self.registry_card_id is None
+            or evidence.repository != str(self.source_repository or self.model_id)
+            or evidence.revision != self.source_revision
+            or evidence.selected_file != self.gguf_file
+        ):
+            raise ValueError(
+                "registry GGUF header evidence does not match runtime artifact"
+            )
+        geometry = qwen35_cache_geometry(
+            evidence.header.architecture,
+            evidence.header.scalars,
+            has_recurrent_layer_override=evidence.header.has_recurrent_layer_override,
+        )
+        if geometry != self.gguf_cache_geometry:
+            raise ValueError(
+                "runtime GGUF geometry disagrees with signed header evidence"
+            )
+        return self
 
     @field_validator("registry_capability_claims", mode="before")
     @classmethod
