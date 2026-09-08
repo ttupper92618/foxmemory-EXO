@@ -212,6 +212,7 @@ from skulk.api.types import (
     ModalitiesCapabilitySection,
     ModelList,
     ModelListModel,
+    ModelRequirements,
     NodeStorageSummary,
     OpenUrlToolRequest,
     OpenUrlToolResponse,
@@ -341,6 +342,12 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.memory_estimate import (
+    GPU_VRAM_WORKING_SET_FRACTION,
+    GPU_WORKING_SET_FRACTION,
+    estimate_shard_footprint,
+    per_token_kv_bytes,
+)
 from skulk.shared.models.model_cards import (
     AudioCardKind,
     AudioResponseFormat,
@@ -348,6 +355,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
     add_to_card_cache,
+    authorized_model_card_digest,
     custom_card_mutation_applied,
     delete_custom_card,
     get_all_model_cards,
@@ -2152,6 +2160,19 @@ class API:
             tags=["Instances"],
             summary="Delete a running instance",
         )(self.delete_instance)
+        self.app.get(
+            "/models/requirements",
+            tags=["Models"],
+            summary="Read advisory model capacity requirements",
+            description=(
+                "Resolve an exact known model using model-list installed/store/custom "
+                "precedence and return its content binding, storage and whole-model "
+                "memory estimate at the requested context. Missing text KV geometry "
+                "returns a null memory estimate. No discovery, download, placement or "
+                "reservation occurs. Compatibility and current identity must be "
+                "rechecked on the joined node before execution."
+            ),
+        )(self.get_model_requirements)
         self.app.get(
             "/models",
             tags=["Models"],
@@ -8512,24 +8533,11 @@ class API:
         return tags
 
     @staticmethod
-    def _model_list_entry(
-        card: "ModelCard",
-        approved_remote_code_card_ids: frozenset[str] | None = None,
-        installed_record: InstalledCardRecord | None = None,
-    ) -> ModelListModel:
-        """Build the public model-list representation for one model card.
-
-        Args:
-            card: Effective catalog card exposed by the API.
-            approved_remote_code_card_ids: Deprecated approvals accepted for
-                compatibility with older callers; current entries ignore them.
-            installed_record: Authoritative central-store generation when one
-                exists. When omitted, the node-local installed-card cache keeps
-                air-gapped and store-unreachable operation self-describing.
-
-        Returns:
-            The public catalog projection for ``card``.
-        """
+    def _effective_model_card(
+        card: ModelCard,
+        installed_record: InstalledCardRecord | None,
+    ) -> tuple[ModelCard, InstalledCardRecord | None]:
+        """Resolve catalog/store/local precedence for all model metadata reads."""
         catalog_card = card
         local_installed_record = get_installed_card_record(card.model_id)
         if (
@@ -8560,6 +8568,29 @@ class API:
             installed_record = installed_record or local_installed_record
         if installed_record is not None:
             card = installed_record.model_card
+        return card, installed_record
+
+    @staticmethod
+    def _model_list_entry(
+        card: "ModelCard",
+        approved_remote_code_card_ids: frozenset[str] | None = None,
+        installed_record: InstalledCardRecord | None = None,
+    ) -> ModelListModel:
+        """Build the public model-list representation for one model card.
+
+        Args:
+            card: Effective catalog card exposed by the API.
+            approved_remote_code_card_ids: Deprecated approvals accepted for
+                compatibility with older callers; current entries ignore them.
+            installed_record: Authoritative central-store generation when one
+                exists. When omitted, the node-local installed-card cache keeps
+                air-gapped and store-unreachable operation self-describing.
+
+        Returns:
+            The public catalog projection for ``card``.
+        """
+        catalog_card = card
+        card, installed_record = API._effective_model_card(card, installed_record)
         remote_code_approval_required = remote_code_execution_requires_approval(card)
         if remote_code_approval_required and approved_remote_code_card_ids is None:
             approved_remote_code_card_ids = approved_remote_code_identities()
@@ -8784,6 +8815,89 @@ class API:
             for task in card.tasks
         )
 
+    async def _model_catalog(
+        self,
+    ) -> tuple[list[ModelCard], dict[ModelId, InstalledCardRecord]]:
+        """Collect visible catalog and complete central-store generations."""
+        cards = await get_model_cards()
+        store_installed_records = await self._cached_store_installed_records()
+        cards_by_id = {card.model_id: card for card in cards}
+        for model_id, record in store_installed_records.items():
+            if model_id in cards_by_id or not self._model_list_card_visible(
+                record.model_card
+            ):
+                continue
+            cards.append(record.model_card)
+            cards_by_id[model_id] = record.model_card
+
+        return cards, store_installed_records
+
+    async def get_model_requirements(
+        self,
+        model_id: Annotated[str, Query(min_length=1, max_length=512)],
+        context_tokens: Annotated[int, Query(ge=1, le=1_048_576)] = 8192,
+    ) -> ModelRequirements:
+        """Read effective model identity and advisory whole-model capacity.
+
+        Args:
+            model_id: Exact known alias; never discovers or authorizes a model.
+            context_tokens: Requested per-sequence context, without silent clamp.
+
+        Returns:
+            Core estimates and compatibility evidence for the effective card.
+            Store outages retain the same last-known projection as model listing.
+
+        Raises:
+            HTTPException: 404 for unknown aliases, 422 above a known context limit.
+        """
+        cards, installed_records = await self._model_catalog()
+        catalog_card = next((card for card in cards if card.model_id == model_id), None)
+        if catalog_card is None:
+            raise HTTPException(
+                status_code=404, detail="Model is not in the effective catalog"
+            )
+        card, _ = self._effective_model_card(
+            catalog_card, installed_records.get(catalog_card.model_id)
+        )
+        if card.context_length > 0 and context_tokens > card.context_length:
+            raise HTTPException(
+                status_code=422, detail="Requested context exceeds the model card limit"
+            )
+        # Unknown KV geometry must not turn a weight-only estimate into a fit
+        # claim. Non-text runners have different runtime memory requirements.
+        memory_bytes = (
+            estimate_shard_footprint(card, 1.0, context_tokens).in_bytes
+            if ModelTask.TextGeneration in card.tasks and per_token_kv_bytes(card) > 0
+            else None
+        )
+        projector_bytes = (
+            card.vision.projector_size or 0
+            if card.gguf_file is not None and card.vision is not None
+            else 0
+        )
+        return ModelRequirements(
+            model_id=str(card.model_id),
+            card_digest=authorized_model_card_digest(card),
+            registry_card_id=card.registry_card_id,
+            context_tokens=context_tokens,
+            context_limit=card.context_length if card.context_length > 0 else None,
+            storage_bytes=card.storage_size.in_bytes + projector_bytes,
+            estimated_memory_bytes=memory_bytes,
+            discrete_gpu_memory_fraction=GPU_VRAM_WORKING_SET_FRACTION,
+            unified_memory_fraction=GPU_WORKING_SET_FRACTION,
+            compatible_backends=tuple(sorted(card.placement.compatible_backends)),
+            engine_support=get_model_engine_support(card),
+            incomplete_capabilities=tuple(
+                sorted(
+                    {
+                        claim.capability_id
+                        for claim in card.registry_capability_claims
+                        if claim.status == "incomplete"
+                    }
+                )
+            ),
+        )
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Return available models with cluster-authoritative installed state.
 
@@ -8797,16 +8911,7 @@ class API:
         Returns:
             Available catalog models and their effective installed state.
         """
-        cards = await get_model_cards()
-        store_installed_records = await self._cached_store_installed_records()
-        cards_by_id = {card.model_id: card for card in cards}
-        for model_id, record in store_installed_records.items():
-            if model_id in cards_by_id or not self._model_list_card_visible(
-                record.model_card
-            ):
-                continue
-            cards.append(record.model_card)
-            cards_by_id[model_id] = record.model_card
+        cards, store_installed_records = await self._model_catalog()
 
         if status == "downloaded":
             downloaded_model_ids: set[str] = set()

@@ -6,10 +6,18 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
 
 import skulk.api.main as api_main
 from skulk.api.main import API
-from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.memory_estimate import estimate_shard_footprint
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    VisionCardConfig,
+    authorized_model_card_digest,
+)
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.store.installed_cards import (
@@ -589,3 +597,212 @@ def test_store_projection_rejects_mismatched_alias(
     )
 
     assert records == {}
+
+
+async def test_requirements_bind_store_card_and_context_estimate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sizing must use installed A even when the same alias now catalogs B."""
+    installed = _card("a").model_copy(
+        update={"num_key_value_heads": 8, "context_length": 16384}
+    )
+    current = _card("b").model_copy(update={"storage_size": Memory.from_gb(100)})
+    record = _installed_record(tmp_path, installed)
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=current,
+        current_registry_card_value=current,
+        local_record=None,
+    )
+    api = _api_with_store(
+        _RegistryStoreClient(
+            [
+                {
+                    "model_id": str(installed.model_id),
+                    "installed_card": record.model_dump(mode="json"),
+                }
+            ]
+        )
+    )
+    first = await api.get_model_requirements(str(installed.model_id), 1024)
+    larger = await api.get_model_requirements(str(installed.model_id), 8192)
+    listing = await api.get_models(status=None)
+    assert (
+        first.registry_card_id
+        == listing.data[0].registry_card_id
+        == installed.registry_card_id
+    )
+    assert first.card_digest == authorized_model_card_digest(installed)
+    assert first.storage_bytes == installed.storage_size.in_bytes
+    assert (
+        first.estimated_memory_bytes
+        == estimate_shard_footprint(installed, 1.0, 1024).in_bytes
+    )
+    assert (
+        larger.estimated_memory_bytes
+        == estimate_shard_footprint(installed, 1.0, 8192).in_bytes
+    )
+    assert first.estimated_memory_bytes is not None
+    assert larger.estimated_memory_bytes is not None
+    assert first.estimated_memory_bytes < larger.estimated_memory_bytes
+    assert first.card_digest == larger.card_digest
+    assert first.estimate_only is True
+    assert first.discrete_gpu_memory_fraction == 0.9
+
+
+async def test_requirements_preserve_custom_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sizing follows the local custom override, not the store's signed alias."""
+    store_record = _installed_record(tmp_path, _card("a"))
+    local_record = _custom_installed_record(tmp_path)
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=local_record.model_card,
+        current_registry_card_value=_card("a"),
+        local_record=local_record,
+    )
+    api = _api_with_store(
+        _RegistryStoreClient(
+            [
+                {
+                    "model_id": str(store_record.model_card.model_id),
+                    "installed_card": store_record.model_dump(mode="json"),
+                }
+            ]
+        )
+    )
+    result = await api.get_model_requirements(str(local_record.model_card.model_id))
+    assert result.card_digest == authorized_model_card_digest(local_record.model_card)
+    assert result.registry_card_id is None
+    assert result.estimated_memory_bytes is None
+
+
+async def test_requirements_store_only_and_hidden_qualification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A complete store-only card is addressable; retained qualification is not."""
+    record = _installed_record(tmp_path, _card("a"))
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=None,
+        current_registry_card_value=None,
+        local_record=None,
+    )
+    api = _api_with_store(
+        _RegistryStoreClient(
+            [
+                {
+                    "model_id": str(record.model_card.model_id),
+                    "installed_card": record.model_dump(mode="json"),
+                }
+            ]
+        )
+    )
+    result = await api.get_model_requirements(str(record.model_card.model_id))
+    assert result.card_digest == authorized_model_card_digest(record.model_card)
+    qualification = _qualification_installed_record(tmp_path)
+    hidden_api = _api_with_store(
+        _RegistryStoreClient(
+            [
+                {
+                    "model_id": str(qualification.model_card.model_id),
+                    "installed_card": qualification.model_dump(mode="json"),
+                }
+            ]
+        )
+    )
+    with pytest.raises(HTTPException) as exc:
+        await hidden_api.get_model_requirements(str(qualification.model_card.model_id))
+    assert exc.value.status_code == 404
+
+
+async def test_requirements_http_bounds_and_unknown_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP edge rejects invalid context and never discovers unknown aliases."""
+    card = _card("a").model_copy(update={"context_length": 4096})
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=card,
+        current_registry_card_value=card,
+        local_record=None,
+    )
+    api = _api_with_store(_RegistryStoreClient([]))
+    app = FastAPI()
+    app.get("/models/requirements")(api.get_model_requirements)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        for context in (0, -1, 4097, 1_048_577):
+            response = await client.get(
+                "/models/requirements",
+                params={"model_id": str(card.model_id), "context_tokens": context},
+            )
+            assert response.status_code == 422
+        unknown = await client.get(
+            "/models/requirements", params={"model_id": "unknown/repo"}
+        )
+        assert unknown.status_code == 404
+        valid = await client.get(
+            "/models/requirements",
+            params={"model_id": str(card.model_id), "context_tokens": 4096},
+        )
+        assert valid.status_code == 200
+        assert valid.json()["estimated_memory_bytes"] is None
+        assert valid.json()["context_tokens"] == 4096
+
+
+def test_authorized_card_digest_covers_content_not_snapshot() -> None:
+    """Copied registry IDs cannot disguise altered cards; publication can repeat."""
+    card = _card("a")
+    digest = authorized_model_card_digest(card)
+    assert digest == authorized_model_card_digest(
+        card.model_copy(update={"registry_snapshot_id": "snapshot_later"})
+    )
+    for update in (
+        {"storage_size": Memory.from_gb(100)},
+        {"source_revision": "b" * 40},
+        {"num_key_value_heads": 8},
+        {"context_length": 100},
+    ):
+        assert digest != authorized_model_card_digest(card.model_copy(update=update))
+    assert digest == authorized_model_card_digest(
+        ModelCard.model_validate_json(card.model_dump_json())
+    )
+
+
+@pytest.mark.parametrize("text_generation", [True, False])
+async def test_requirements_projector_and_non_text_memory(
+    monkeypatch: pytest.MonkeyPatch, text_generation: bool
+) -> None:
+    """Projector disk is included; text geometry cannot size a speech runner."""
+    card = _card("a").model_copy(
+        update={
+            "gguf_file": "model.gguf",
+            "num_key_value_heads": 8,
+            "vision": VisionCardConfig(
+                projector_file="mmproj.gguf", projector_size=1048576
+            ),
+            "tasks": [
+                ModelTask.TextGeneration if text_generation else ModelTask.SpeechToText
+            ],
+        }
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=card,
+        current_registry_card_value=card,
+        local_record=None,
+    )
+    result = await _api_with_store(_RegistryStoreClient([])).get_model_requirements(
+        str(card.model_id)
+    )
+    assert result.storage_bytes == card.storage_size.in_bytes + 1048576
+    if text_generation:
+        assert (
+            result.estimated_memory_bytes
+            == estimate_shard_footprint(card, 1.0).in_bytes
+        )
+    else:
+        assert result.estimated_memory_bytes is None
