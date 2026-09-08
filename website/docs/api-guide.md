@@ -3603,6 +3603,8 @@ up. The master also reserves newly accepted creations while their indexed events
 are pending. Previews themselves do not reserve capacity. A later request can
 therefore be refused when another placement has committed the remaining memory.
 `POST /instance` also checks its GPU shard footprint against that remaining pool.
+An exact GPU placement with no usable VRAM observation is refused; it cannot
+substitute a system-RAM estimate for the missing GPU budget.
 If the master refuses an already acknowledged exact-create command, `/state`
 retains `instanceFailures` with its instance ID and `errorCode: placement_failed`;
 controllers should use this terminal evidence rather than wait for a runner.

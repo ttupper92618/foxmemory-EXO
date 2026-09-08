@@ -182,3 +182,17 @@ def test_exact_gpu_placement_cannot_bypass_committed_capacity(known_kv: bool) ->
             {node: create_node_memory(Memory.from_gb(64).in_bytes)},
             node_vram={node: Memory.from_gb(1)},
         )
+
+
+@pytest.mark.parametrize("missing_map", [False, True])
+def test_exact_gpu_placement_requires_vram_observation(missing_map: bool) -> None:
+    """Unknown GPU capacity is not permission to reuse the system-RAM estimate."""
+    node = NodeId()
+    with pytest.raises(PlacementError, match="GPU memory telemetry"):
+        add_instance_to_placements(
+            CreateInstance(instance=_instance(node)),
+            Topology(),
+            {},
+            {node: create_node_memory(Memory.from_gb(64).in_bytes)},
+            node_vram=None if missing_map else {},
+        )

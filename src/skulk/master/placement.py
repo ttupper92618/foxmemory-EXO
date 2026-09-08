@@ -240,12 +240,12 @@ def add_instance_to_placements(
             shard = assignments.runner_to_shard[runner_id]
             available = (node_vram or {}).get(node_id)
             fraction = shard_fraction_of_model(shard)
-            if (
-                available is None
-                or fraction is None
-                or not backend_offloads_to_vram(shard.resolved_backend)
-            ):
+            if not backend_offloads_to_vram(shard.resolved_backend):
                 continue
+            if available is None or fraction is None:
+                raise PlacementError(
+                    "GPU memory telemetry and a concrete shard are required for exact placement"
+                )
             # A context ceiling alone is not a weights admission check: it can
             # become zero, or fall back to the card when KV geometry is absent.
             # Exact placements must not bypass the already-committed GPU budget.

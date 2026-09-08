@@ -2085,7 +2085,10 @@ class API:
                 "card already present in the authorized local catalog. A positive "
                 "contextTokenLimit caps the requested window: admission may lower "
                 "it for current resources but never raises it. Nonpositive "
-                "explicit limits are rejected during placement."
+                "explicit limits are rejected during placement. Master admission "
+                "requires observed VRAM for concrete GPU shards and accounts for "
+                "existing placements. A refused acknowledged command retains "
+                "placement_failed evidence in the instance failure history."
             ),
         )(self.create_instance)
         self.app.post(
