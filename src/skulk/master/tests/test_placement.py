@@ -958,7 +958,13 @@ def test_legacy_gguf_instance_backfill_floor_when_context_length_unknown() -> No
     assert instance.context_token_limit == KV_CONTEXT_BUDGET_TOKENS
 
 
-def test_create_instance_restamps_context_token_limit() -> None:
+@pytest.mark.parametrize(
+    "requested,expected",
+    [(512, 512), (4096, 4096), (999_999, 4096), (0, None), (-1, None)],
+)
+def test_create_instance_restamps_context_token_limit(
+    requested: int, expected: int | None
+) -> None:
     # The exact-control POST /instance path must stamp the master's
     # memory-derived ceiling too (#292 review) — runners trust the stamped
     # field now, so a client-supplied placement can't smuggle in an inflated
@@ -983,13 +989,57 @@ def test_create_instance_restamps_context_token_limit() -> None:
         ),
         hosts_by_node={},
         ephemeral_port=50000,
-        context_token_limit=999_999,  # client-inflated; must be overridden
+        context_token_limit=requested,
     )
     command = CreateInstance(command_id=CommandId(), instance=client_instance)
     node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    if expected is None:
+        with pytest.raises(PlacementError, match="must be positive"):
+            add_instance_to_placements(command, Topology(), {}, node_memory)
+        return
     result = add_instance_to_placements(command, Topology(), {}, node_memory)
     stamped = next(iter(result.values())).context_token_limit
-    assert stamped is not None and stamped <= 4096
+    assert stamped == expected
+
+
+def test_exact_served_placement_preserves_requested_window() -> None:
+    """A generous GPU preview cannot inflate a caller's load-time KV allocation."""
+    node_id, runner_id = NodeId(), RunnerId()
+    card = ModelCard(
+        model_id=ModelId("bounded-gguf"),
+        storage_size=Memory.from_gb(6),
+        n_layers=32,
+        hidden_size=4096,
+        num_key_value_heads=4,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model.gguf",
+        context_length=262144,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            node_to_runner={node_id: runner_id},
+            runner_to_shard={
+                runner_id: _make_shard_metadata(card).model_copy(
+                    update={"resolved_backend": "llama_cpp-cuda"}
+                )
+            },
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        context_token_limit=8192,
+    )
+    node_memory = {node_id: create_node_memory(Memory.from_gb(64).in_bytes)}
+    result = add_instance_to_placements(
+        CreateInstance(command_id=CommandId(), instance=instance),
+        Topology(),
+        {},
+        node_memory,
+        node_vram={node_id: Memory.from_gb(22)},
+    )
+    assert result[instance.instance_id].context_token_limit == 8192
 
 
 def test_create_instance_reserves_pinned_projector_on_exact_host(

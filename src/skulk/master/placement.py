@@ -220,6 +220,14 @@ def add_instance_to_placements(
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
         fixed_memory_by_node=fixed_memory_by_node,
     )
+    requested_limit = command.instance.context_token_limit
+    if requested_limit is not None:
+        if requested_limit <= 0:
+            raise PlacementError("The requested context token limit must be positive")
+        # Exact placement callers may intentionally budget a smaller window than
+        # the preview maximum. Raising it silently can multiply load-time KV
+        # allocation and defeat the caller's resource plan.
+        ceiling = requested_limit if ceiling is None else min(ceiling, requested_limit)
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
     return {**current_instances, instance.instance_id: instance}
 

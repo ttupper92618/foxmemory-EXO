@@ -2082,7 +2082,10 @@ class API:
                 "when you want exact control instead of Skulk picking the "
                 "placement. Every embedded shard card must identify the same "
                 "model alias as the assignment and exactly match the effective "
-                "card already present in the authorized local catalog."
+                "card already present in the authorized local catalog. A positive "
+                "contextTokenLimit caps the requested window: admission may lower "
+                "it for current resources but never raises it. Nonpositive "
+                "explicit limits are rejected during placement."
             ),
         )(self.create_instance)
         self.app.post(
