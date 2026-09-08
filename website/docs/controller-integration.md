@@ -151,4 +151,7 @@ At placement, compare the preview's `card_digest` with the approved requirements
 check its exact node/backend and sufficient `contextTokenLimit`, and submit only
 that returned instance. Persist the instance's complete shard card for subsequent
 state comparisons. The master can recompute context capacity from current
-resources, so recheck the accepted instance before declaring readiness.
+resources, so recheck the accepted instance before declaring readiness. Exact-instance creation does not
+atomically revalidate node topology or backend/build support: obtain a fresh
+preview, check live target support before submission, and keep checking it during
+readiness and operation.

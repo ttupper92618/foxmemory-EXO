@@ -975,5 +975,7 @@ External workload binding: `GET /models/requirements.required_capabilities`
 exports the complete set used by core signed-engine admission through
 `get_model_required_capabilities`. Launchable `/instance/previews` entries expose
 `card_digest` matching requirements canonicalization. Neither field replaces
-master validation of full card identity, current backend support or the final
-resource-derived `context_token_limit`.
+API/master card checks or the final resource-derived `context_token_limit`.
+Exact-instance creation does not atomically revalidate topology or backend/build
+support; controllers must obtain fresh previews and recheck live target support
+before submission and throughout readiness.

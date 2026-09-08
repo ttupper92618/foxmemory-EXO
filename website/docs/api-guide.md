@@ -3565,7 +3565,11 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 submitting `POST /instance`, compare that digest to approved requirements and
 retain the exact returned instance. A matching alias or registry ID alone does
 not establish identical card contents. The preview digest grants no admission:
-the master still validates the full submitted card and current node support.
+the API/master card checks and resource-derived context ceiling still apply.
+The exact-instance creation path does not atomically revalidate current topology
+or backend/build support. Controllers must obtain a fresh target-specific preview,
+verify live node support before submission, and continue checking support and
+readiness afterward; an accepted command alone is not proof of usable capacity.
 
 The requirements response also includes `required_capabilities`, the complete
 positively evidenced intrinsic capability set used by core's signed-engine

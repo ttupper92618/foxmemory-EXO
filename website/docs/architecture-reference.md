@@ -1289,4 +1289,6 @@ The requirements response exports `required_capabilities` from the same pure
 External planners must cover its entire nonempty set, exact engine build and
 hardware restrictions. Launchable placement previews expose the same complete
 `card_digest` for binding approved requirements to the submitted instance;
-accepted state and current node admission remain authoritative afterward.
+the API/master card checks and resource-derived context ceiling still apply.
+Exact-instance creation does not atomically revalidate topology or backend/build
+support, so controllers must check live node support before and after submission.
