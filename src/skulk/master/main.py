@@ -161,7 +161,13 @@ from skulk.shared.types.worker.instances import (
     InstanceId,
     InstanceMeta,
 )
-from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
+from skulk.shared.types.worker.runners import (
+    RunnerFailed,
+    RunnerReady,
+    RunnerRunning,
+    RunnerShutdown,
+    RunnerShuttingDown,
+)
 from skulk.shared.types.worker.shards import (
     RpcDonorShardMetadata,
     Sharding,
@@ -692,6 +698,39 @@ def instances_wedged_by_download_failure(
         if failed_nodes:
             wedged[instance_id] = (frozenset(failed_nodes), cause)
     return wedged
+
+def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
+    """Rank viable text placements by readiness, ordinary role and active load.
+
+    A failed or shutting-down rank cannot execute queued work. Keep cold placements
+    eligible only behind ready capacity, and do not divert ordinary requests into
+    a resident steward when an ordinary placement is ready. Completed lifecycle
+    tasks are retained state, not outstanding inference load.
+    """
+    ranked: list[tuple[bool, bool, int, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if assignments.model_id != model_id or not assignments.runner_to_shard:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(
+            isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses
+        )
+        active = sum(
+            isinstance(task, TextGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append(
+            (not ready, instance.system_role is not None, active, instance.instance_id)
+        )
+    return [identifier for _, _, _, identifier in sorted(ranked)]
 
 
 class Master:
@@ -1909,56 +1948,32 @@ class Master:
                         case TestCommand():
                             pass
                         case TextGeneration():
-                            for instance in self.state.instances.values():
-                                if (
-                                    instance.shard_assignments.model_id
-                                    == command.task_params.model
-                                ):
-                                    task_count = sum(
-                                        1
-                                        for task in self.state.tasks.values()
-                                        if task.instance_id == instance.instance_id
-                                    )
-                                    instance_task_counts[instance.instance_id] = (
-                                        task_count
-                                    )
-
-                            # A pinned request (steward/canary) must fail its
-                            # task cleanly even when NO instance serves the
-                            # model anymore (the pinned instance vanished
-                            # between caller lookup and processing); raising
-                            # here would leave the caller hanging with no
-                            # terminal event. Mirrors the SpeechSynthesis
-                            # guard.
-                            if (
-                                not instance_task_counts
-                                and command.target_instance_id is None
-                            ):
-                                raise ValueError(
-                                    f"No instance found for model {command.task_params.model}"
-                                )
-
+                            eligible = text_generation_instances(
+                                self.state, command.task_params.model
+                            )
                             task_id = TaskId()
                             target_unavailable = False
                             if command.target_instance_id is not None:
-                                # Steward/canary path: pin to the requested
-                                # instance (mirrors SpeechSynthesis); a miss
-                                # fails the task instead of silently landing
-                                # on another placement.
-                                if (
-                                    command.target_instance_id
-                                    not in instance_task_counts
-                                ):
-                                    target_unavailable = True
                                 selected_instance_id = command.target_instance_id
-                            else:
-                                available_instance_ids = sorted(
-                                    instance_task_counts.keys(),
-                                    key=lambda instance_id: instance_task_counts[
-                                        instance_id
-                                    ],
+                                target_unavailable = (
+                                    selected_instance_id not in eligible
                                 )
-                                selected_instance_id = available_instance_ids[0]
+                            elif eligible:
+                                selected_instance_id = eligible[0]
+                            else:
+                                # Even a vanished/all-failed model needs a terminal
+                                # task correlated to its caller. This identifier
+                                # does not create or advertise an instance.
+                                selected_instance_id = next(
+                                    (
+                                        instance.instance_id
+                                        for instance in self.state.instances.values()
+                                        if instance.shard_assignments.model_id
+                                        == command.task_params.model
+                                    ),
+                                    InstanceId(str(command.command_id)),
+                                )
+                                target_unavailable = True
                             trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
@@ -1991,8 +2006,8 @@ class Master:
                                         error_type="instance_unavailable",
                                         error_message=(
                                             "Requested text-generation instance "
-                                            "is unavailable or does not serve "
-                                            "the requested model"
+                                            "is unavailable, has a terminal runner, "
+                                            "or does not serve the requested model"
                                         ),
                                     )
                                 )
