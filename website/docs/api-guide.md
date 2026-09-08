@@ -3585,3 +3585,11 @@ per-sequence context budget and verifies the live accepted instance after
 submission: the master computes the limit from current resources. Keep watching
 the exact instance's card, resolved backend, context capacity and node assignment;
 metadata from a previous preview is not fresh readiness evidence.
+
+For `POST /instance`, a positive `contextTokenLimit` is an upper bound chosen by
+the caller. The master preserves a smaller requested window and lowers an
+inflated one to its current resource-derived ceiling; it never raises the request
+to the preview maximum. Nonpositive explicit limits are rejected during placement.
+An omitted limit retains the instance schema's model/engine backfill, still
+bounded by admission. Controllers budgeting a specific load-time KV allocation
+should set that exact limit and verify it on the accepted instance.
