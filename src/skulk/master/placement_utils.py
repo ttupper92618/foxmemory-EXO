@@ -9,7 +9,10 @@ from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
     UMA_GPU_OS_HEADROOM,
+    backend_offloads_to_vram,
+    estimate_shard_footprint,
     memory_overhead_factor,
+    shard_fraction_of_model,
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
@@ -31,6 +34,7 @@ from skulk.shared.types.profiling import (
     SystemPerformanceProfile,
 )
 from skulk.shared.types.topology import Cycle, RDMAConnection, SocketConnection
+from skulk.shared.types.worker.instances import Instance, InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
@@ -99,6 +103,7 @@ def usable_vram_by_node(
     node_system: Mapping[NodeId, SystemPerformanceProfile],
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+    current_instances: Mapping[InstanceId, Instance] | None = None,
 ) -> dict[NodeId, Memory]:
     """Per-node usable GPU memory for placement, keyed by node.
 
@@ -116,6 +121,12 @@ def usable_vram_by_node(
       GPU_VRAM_WORKING_SET_FRACTION)``. VRAM is a dedicated pool reported
       separately from system RAM, so placement admits against VRAM, not
       ``0.75 * system_ram``, and never assumes the whole card is free.
+      When ``current_instances`` is supplied, committed concrete GPU shards
+      reduce the static working-set ceiling by their estimated weights,
+      overhead, and stamped context window. This covers allocations not yet
+      visible in telemetry without subtracting loaded memory twice. RPC
+      placements have no concrete per-device partition and retain observed
+      memory admission; their driver shard is not a whole-model reservation.
     * Unified-memory APU (e.g. AMD Strix Halo), detected when the GTT aperture
       spans the whole system (``gtt_total > vram_total`` AND ``gtt_total >=
       ram_total``): the GPU addresses the BIOS VRAM carve-out PLUS system RAM
@@ -181,6 +192,77 @@ def usable_vram_by_node(
             usable[node_id] = Memory.from_bytes(vram_usable + sys_for_gpu)
             continue
         usable[node_id] = Memory.from_bytes(vram_usable)
+    return reserve_instance_vram(
+        usable,
+        node_system,
+        current_instances or {},
+        unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+            node_system, node_resources, node_memory
+        ),
+    )
+
+
+def reserve_instance_vram(
+    node_vram: Mapping[NodeId, Memory],
+    node_system: Mapping[NodeId, SystemPerformanceProfile],
+    current_instances: Mapping[InstanceId, Instance],
+    *,
+    unified_memory_gpu_nodes: frozenset[NodeId] = frozenset(),
+) -> dict[NodeId, Memory]:
+    """Cap observed discrete VRAM by the capacity committed to concrete shards.
+
+    Args:
+        node_vram: Observed usable memory, or a hypothetical teardown-credit map.
+        node_system: Accelerator telemetry containing physical VRAM totals.
+        current_instances: Placements that still own their shard reservations.
+        unified_memory_gpu_nodes: APUs using host memory; retain their existing
+            combined-pool admission instead of treating the VRAM carve as a cap.
+
+    Returns:
+        A fresh memory map bounded by both observations and uncommitted physical
+        working-set capacity. RPC partitions remain observation-only because
+        their runtime-selected per-device shares are not represented by shards.
+    """
+    committed: dict[NodeId, int] = {}
+    for instance in current_instances.values():
+        if isinstance(instance, LlamaRpcInstance):
+            # The driver nominally spans every layer but llama.cpp chooses the
+            # actual pooled split at runtime. Charging that nominal shard would
+            # invent a full-model allocation on the driver and none on donors.
+            continue
+        assignments = instance.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard[runner_id]
+            if not backend_offloads_to_vram(shard.resolved_backend):
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None:
+                continue
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                context_budget=(
+                    instance.context_token_limit
+                    if instance.context_token_limit is not None
+                    else PLACEMENT_KV_CONTEXT_BUDGET_TOKENS
+                ),
+            )
+            committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
+    usable = dict(node_vram)
+    for node_id, observed in node_vram.items():
+        profile = node_system.get(node_id)
+        accelerator = profile.accelerator if profile is not None else None
+        total = accelerator.vram_total_bytes if accelerator is not None else None
+        if node_id in unified_memory_gpu_nodes or total is None or total <= 0:
+            continue
+        ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
+        # Observed usage includes loaded instances already. Bound against the
+        # remaining static budget instead of subtracting from observed free
+        # memory, which would count those allocations twice. After deletion,
+        # lagging telemetry still limits admission until memory is released.
+        usable[node_id] = Memory.from_bytes(
+            min(observed.in_bytes, max(0, ceiling - committed.get(node_id, 0)))
+        )
     return usable
 
 
@@ -473,7 +555,9 @@ def filter_cycles_by_memory(
         for node_id, share in node_shares.items():
             kv_share = share * kv_ratio
             required_with_overhead = (
-                share * overhead_factor + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                share * overhead_factor
+                + kv_share
+                + PLACEMENT_MEMORY_OVERHEAD_FLOOR
                 + fixed_memory_by_node.get(node_id, Memory())
             )
             node_vram_usable = node_vram.get(node_id)
@@ -650,7 +734,9 @@ def _allocate_and_validate_layers(
     for i, node_id in enumerate(node_ids):
         node_layers = layer_allocations[i]
         required_memory = (total_storage * node_layers) // total_layers
-        usable_memory = _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+        usable_memory = _node_usable_memory(
+            node_memory[node_id], node_vram.get(node_id)
+        )
         if required_memory > usable_memory:
             pool = (
                 "GPU VRAM"
@@ -872,9 +958,7 @@ def get_shard_assignments_for_llama_rpc(
     """
     _validate_cycle(cycle)
     if driver_node not in cycle.node_ids:
-        raise ValueError(
-            f"Driver node {driver_node} is not part of the selected cycle"
-        )
+        raise ValueError(f"Driver node {driver_node} is not part of the selected cycle")
     world_size = len(cycle.node_ids)
     runner_to_shard: dict[RunnerId, ShardMetadata] = {}
     node_to_runner: dict[NodeId, RunnerId] = {}
@@ -1075,9 +1159,7 @@ def _is_routable_rpc_donor_address(ip: str) -> bool:
     except ValueError:
         return False
     return (
-        address.version == 4
-        and not address.is_link_local
-        and not address.is_loopback
+        address.version == 4 and not address.is_link_local and not address.is_loopback
     )
 
 

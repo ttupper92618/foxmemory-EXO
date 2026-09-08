@@ -3147,6 +3147,7 @@ class API:
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
+                        current_instances=self.state.instances,
                     ),
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
@@ -3267,6 +3268,7 @@ class API:
                     self._telemetry_view.node_system,
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
+                    current_instances=self.state.instances,
                 ),
                 unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                     self._telemetry_view.node_system,
@@ -3391,6 +3393,7 @@ class API:
             self._telemetry_view.node_system,
             self._telemetry_view.node_resources,
             node_memory=self._telemetry_view.node_memory,
+            current_instances=self.state.instances,
         )
         placement_unified_memory_gpu_nodes = unified_memory_gpu_node_ids(
             self._telemetry_view.node_system,

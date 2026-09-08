@@ -28,7 +28,13 @@ from skulk.shared.models.capabilities import (
     family_predates_in_process_llama_cpp,
     resolve_model_capability_profile,
 )
-from skulk.shared.models.memory_estimate import instance_context_token_limit
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    backend_offloads_to_vram,
+    estimate_shard_footprint,
+    instance_context_token_limit,
+    shard_fraction_of_model,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -229,6 +235,29 @@ def add_instance_to_placements(
         # allocation and defeat the caller's resource plan.
         ceiling = requested_limit if ceiling is None else min(ceiling, requested_limit)
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
+    if not isinstance(instance, LlamaRpcInstance):
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard[runner_id]
+            available = (node_vram or {}).get(node_id)
+            fraction = shard_fraction_of_model(shard)
+            if (
+                available is None
+                or fraction is None
+                or not backend_offloads_to_vram(shard.resolved_backend)
+            ):
+                continue
+            # A context ceiling alone is not a weights admission check: it can
+            # become zero, or fall back to the card when KV geometry is absent.
+            # Exact placements must not bypass the already-committed GPU budget.
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                context_budget=ceiling
+                if ceiling is not None
+                else KV_CONTEXT_BUDGET_TOKENS,
+            )
+            if ceiling == 0 or footprint > available:
+                raise PlacementError("Insufficient GPU memory for the exact placement")
     return {**current_instances, instance.instance_id: instance}
 
 

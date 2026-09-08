@@ -607,6 +607,15 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 
 ### Models / placement
 
+Discrete-GPU admission uses `usable_vram_by_node` / `reserve_instance_vram`:
+`min(observed usable VRAM, 90% of physical VRAM - committed concrete shard
+footprints)`. Footprints use each instance's stamped context window. Master-local
+creations reserve before event submission and retire their temporary reservation
+when indexed; deletion and observed release are distinct. API preview/preflight,
+ordinary/exact placement, repair and steward paths share these inputs. Exact GPU
+refusals retain `placement_failed` instance history. RPC runtime-selected
+partitions remain observation-only; UMA retains combined-pool admission.
+
 | Endpoint | Method | What |
 |---|---|---|
 | `/models`, `/v1/models` | GET | List available models |

@@ -27,6 +27,7 @@ from skulk.master.placement import (
     require_instance_model_card_identity,
 )
 from skulk.master.placement_utils import (
+    reserve_instance_vram,
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
@@ -83,6 +84,7 @@ from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
+    InstanceCreated,
     InstanceDeleted,
     InstanceFailureRecorded,
     LocalForwarderEvent,
@@ -754,6 +756,10 @@ class Master:
         # A promoted master starts a new view and lazily seeds each alias from
         # its node's already converged card cache before the first new command.
         self._ordered_model_cards: dict[ModelId, ModelCard | None] = {}
+        # Local placement effects reach indexed State on another task. Reserve
+        # their GPU capacity before queuing the event so consecutive decisions
+        # cannot spend the same memory while that echo is outstanding.
+        self._pending_instance_reservations: dict[InstanceId, Instance] = {}
         self._ordered_steward_proposals = dict(
             initial_state.steward_action_proposals if initial_state is not None else {}
         )
@@ -903,6 +909,10 @@ class Master:
         """Apply one durable event and synchronize the master's telemetry view."""
 
         self.state = apply(self.state, indexed)
+        if isinstance(indexed.event, InstanceCreated):
+            self._pending_instance_reservations.pop(indexed.event.instance.instance_id, None)
+        elif isinstance(indexed.event, InstanceDeleted):
+            self._pending_instance_reservations.pop(indexed.event.instance_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
 
     def _ordered_model_card(self, model_id: ModelId) -> ModelCard | None:
@@ -1095,8 +1105,25 @@ class Master:
                 del self._recently_freed_bytes[node_id]
         return credit
 
+    async def _queue_control_event(self, event: Event) -> None:
+        """Reserve a new placement before its asynchronous indexed echo returns."""
+        if isinstance(event, InstanceCreated):
+            self._pending_instance_reservations[event.instance.instance_id] = event.instance
+        await self.event_sender.send(event)
+
+    def _placement_reservations(
+        self, instances: Mapping[InstanceId, Instance]
+    ) -> dict[InstanceId, Instance]:
+        """Overlay local committed creations on a real or hypothetical placement set."""
+        reservations = dict(self._pending_instance_reservations)
+        for reservation in self._steward_reserved_placements.values():
+            reservations.update(reservation)
+        reservations.update(instances)
+        return reservations
+
     def _placement_memory_inputs(
         self,
+        current_instances: Mapping[InstanceId, Instance] | None = None,
     ) -> tuple[
         Mapping[NodeId, MemoryUsage],
         Mapping[NodeId, Memory],
@@ -1114,6 +1141,9 @@ class Master:
         ``ram_total`` is never credited, so context-ceiling math stays anchored
         to physical capacity.
         """
+        placements = self._placement_reservations(
+            self.state.instances if current_instances is None else current_instances
+        )
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
         if not credit:
@@ -1121,6 +1151,7 @@ class Master:
                 self._telemetry_view.node_system,
                 self._telemetry_view.node_resources,
                 node_memory=base_memory,
+                current_instances=placements,
             )
             return base_memory, base_vram
         # Credit the freed bytes onto each node's ram_available, clamped to
@@ -1152,6 +1183,7 @@ class Master:
             self._telemetry_view.node_system,
             self._telemetry_view.node_resources,
             node_memory=memory,
+            current_instances=placements,
         )
         return memory, vram
 
@@ -1162,7 +1194,9 @@ class Master:
     ) -> dict[InstanceId, Instance]:
         """Compute one approved steward placement using authoritative inputs."""
         self._require_ordered_place_instance_card(command)
-        credited_memory, credited_vram = self._placement_memory_inputs()
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            current_instances
+        )
         return place_instance(
             command,
             self.state.topology,
@@ -1404,7 +1438,7 @@ class Master:
                             }
                         )
                         self._ordered_steward_proposals[proposal_id] = failed
-                        await self.event_sender.send(
+                        await self._queue_control_event(
                             StewardActionProposalChanged(proposal=failed)
                         )
                         continue
@@ -1431,7 +1465,7 @@ class Master:
                     for event in get_transition_events(
                         self.state.instances, after_delete, self.state.tasks
                     ):
-                        await self.event_sender.send(event)
+                        await self._queue_control_event(event)
                     continue
             else:
                 replace_command = replacement_command_for_download_failed_instance(
@@ -1458,7 +1492,7 @@ class Master:
                         }
                     )
                     self._ordered_steward_proposals[proposal_id] = failed
-                    await self.event_sender.send(
+                    await self._queue_control_event(
                         StewardActionProposalChanged(proposal=failed)
                     )
                     continue
@@ -1475,7 +1509,7 @@ class Master:
                         }
                     )
                     self._ordered_steward_proposals[proposal_id] = failed
-                    await self.event_sender.send(
+                    await self._queue_control_event(
                         StewardActionProposalChanged(proposal=failed)
                     )
                     continue
@@ -1501,17 +1535,17 @@ class Master:
                 self._ordered_steward_proposals[proposal_id] = dispatched
                 self._steward_restart_teardown_issued.discard(proposal_id)
                 self._steward_dispatched_effect_issued.add(proposal_id)
-                await self.event_sender.send(
+                await self._queue_control_event(
                     StewardActionProposalChanged(proposal=dispatched)
                 )
                 for event in get_transition_events(
                     ordered_instances, replacement, self.state.tasks
                 ):
-                    await self.event_sender.send(event)
+                    await self._queue_control_event(event)
                 continue
             self._ordered_steward_proposals[proposal_id] = failed
             self._steward_restart_teardown_issued.discard(proposal_id)
-            await self.event_sender.send(
+            await self._queue_control_event(
                 StewardActionProposalChanged(proposal=failed)
             )
         self._prune_ordered_steward_action_proposals()
@@ -1555,7 +1589,7 @@ class Master:
                 self._steward_reserved_placements.pop(proposal_id, None)
                 self._steward_restart_teardown_issued.discard(proposal_id)
                 self._steward_dispatched_effect_issued.add(proposal_id)
-                await self.event_sender.send(
+                await self._queue_control_event(
                     StewardActionProposalChanged(proposal=failed)
                 )
                 continue
@@ -1700,7 +1734,7 @@ class Master:
                         for event in get_transition_events(
                             self.state.instances, after_delete, self.state.tasks
                         ):
-                            await self.event_sender.send(event)
+                            await self._queue_control_event(event)
                         continue
                     replacement_command = (
                         replacement_command_for_download_failed_instance(
@@ -1737,7 +1771,7 @@ class Master:
                     update={"status": "failed", "outcome": str(error)[:1024]}
                 )
                 self._ordered_steward_proposals[proposal_id] = failed
-                await self.event_sender.send(
+                await self._queue_control_event(
                     StewardActionProposalChanged(proposal=failed)
                 )
                 continue
@@ -1750,13 +1784,13 @@ class Master:
                     update={"status": "failed", "outcome": str(error)[:1024]}
                 )
                 self._ordered_steward_proposals[proposal_id] = failed
-                await self.event_sender.send(
+                await self._queue_control_event(
                     StewardActionProposalChanged(proposal=failed)
                 )
                 continue
             self._steward_dispatched_effect_issued.add(proposal_id)
             for event in events:
-                await self.event_sender.send(event)
+                await self._queue_control_event(event)
         self._prune_ordered_steward_action_proposals()
 
     async def _arm_approved_steward_download_cancellations(self) -> None:
@@ -1785,7 +1819,7 @@ class Master:
                     }
                 )
                 self._ordered_steward_proposals[proposal_id] = failed
-                await self.event_sender.send(
+                await self._queue_control_event(
                     StewardActionProposalChanged(proposal=failed)
                 )
                 continue
@@ -1800,7 +1834,7 @@ class Master:
                 }
             )
             self._ordered_steward_proposals[proposal_id] = dispatched
-            await self.event_sender.send(
+            await self._queue_control_event(
                 StewardActionProposalChanged(proposal=dispatched)
             )
         self._prune_ordered_steward_action_proposals()
@@ -2562,7 +2596,7 @@ class Master:
                                     DeleteInstance(instance_id=command.instance_id),
                                     self.state.instances,
                                 )
-                                await self.event_sender.send(
+                                await self._queue_control_event(
                                     instance_failure_event(
                                         refused,
                                         error_code="placement_failed",
@@ -2591,7 +2625,7 @@ class Master:
                                     after_delete,
                                     self.state.tasks,
                                 ):
-                                    await self.event_sender.send(event)
+                                    await self._queue_control_event(event)
                             elif command.instance_id in self._refusal_replaced:
                                 # Another rank of the same instance already
                                 # triggered re-placement (self.state lags command
@@ -2634,6 +2668,7 @@ class Master:
                                             self._telemetry_view.node_system,
                                             self._telemetry_view.node_resources,
                                             node_memory=self._telemetry_view.node_memory,
+                                            current_instances=self._placement_reservations(after_delete),
                                         ),
                                         unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                             self._telemetry_view.node_system,
@@ -2693,6 +2728,7 @@ class Master:
                                                 self._telemetry_view.node_system,
                                                 self._telemetry_view.node_resources,
                                                 node_memory=self._telemetry_view.node_memory,
+                                                current_instances=self._placement_reservations(after_delete),
                                             ),
                                             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                                 self._telemetry_view.node_system,
@@ -2881,7 +2917,24 @@ class Master:
                         case RequestEventLog():
                             self._schedule_event_log_replay(command.since_idx)
                     for event in generated_events:
-                        await self.event_sender.send(event)
+                        await self._queue_control_event(event)
+                except PlacementError as error:
+                    if (
+                        isinstance(forwarder_command.command, CreateInstance)
+                        and forwarder_command.command.instance.instance_id
+                        not in self._placement_reservations(self.state.instances)
+                    ):
+                        # Exact-create acknowledgements precede master admission.
+                        # Retain failure identity so controllers can clean up a
+                        # refused placement instead of waiting for a missing runner.
+                        await self._queue_control_event(
+                            instance_failure_event(
+                                forwarder_command.command.instance,
+                                error_code="placement_failed",
+                                error_message="Exact placement failed current admission checks.",
+                            )
+                        )
+                    logger.opt(exception=error).warning("Placement command refused")
                 except ValueError as e:
                     logger.opt(exception=e).warning("Error in command processor")
 
@@ -2939,7 +2992,7 @@ class Master:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
             for expiry_event in self._expire_steward_action_proposals(now):
-                await self.event_sender.send(expiry_event)
+                await self._queue_control_event(expiry_event)
             self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master
@@ -2992,7 +3045,7 @@ class Master:
                     f"Failing orphaned task {task_failed.task_id}: "
                     f"{task_failed.error_message}"
                 )
-                await self.event_sender.send(task_failed)
+                await self._queue_control_event(task_failed)
 
             # Reap lifecycle tasks whose executor died with its old node
             # identity (#647): grace-based because instance deletion already
@@ -3008,7 +3061,7 @@ class Master:
                         f"Failing stale lifecycle task {task_failed.task_id}: "
                         f"{task_failed.error_message}"
                     )
-                    await self.event_sender.send(task_failed)
+                    await self._queue_control_event(task_failed)
 
             # Retain the failure before either InstanceDeleted or NodeTimedOut
             # removes the placement. Timed-out nodes may still be present in
@@ -3018,7 +3071,7 @@ class Master:
                 for failure_event in dead_node_instance_failure_events(
                     self.state, connected_node_ids, timed_out_node_ids
                 ):
-                    await self.event_sender.send(failure_event)
+                    await self._queue_control_event(failure_event)
 
             # Kill instances whose assigned node has already left topology.
             # NodeTimedOut below owns teardown for timed-out-but-still-present
@@ -3027,7 +3080,7 @@ class Master:
                 for instance_id, instance in self.state.instances.items():
                     for node_id in instance.shard_assignments.node_to_runner:
                         if node_id not in connected_node_ids:
-                            await self.event_sender.send(
+                            await self._queue_control_event(
                                 InstanceDeleted(instance_id=instance_id)
                             )
                             break
@@ -3051,7 +3104,7 @@ class Master:
                     f"Removing node {node_id}: all liveness signals exceeded "
                     f"the {evidence.timeout_seconds:.0f}s timeout"
                 )
-                await self.event_sender.send(
+                await self._queue_control_event(
                     NodeTimedOut(node_id=node_id, evidence=evidence)
                 )
 
@@ -3110,7 +3163,7 @@ class Master:
             # #223): get_transition_events below emits InstanceDeleted, whose
             # apply drops the instance's tasks.
             for task_failed in orphaned_task_failure_events(self.state, {instance_id}):
-                await self.event_sender.send(task_failed)
+                await self._queue_control_event(task_failed)
             after_delete = delete_instance(
                 DeleteInstance(instance_id=instance_id), self.state.instances
             )
@@ -3133,6 +3186,7 @@ class Master:
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
+                        current_instances=self._placement_reservations(after_delete),
                     ),
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
@@ -3154,7 +3208,7 @@ class Master:
             transition_events = get_transition_events(
                 self.state.instances, final_placement, self.state.tasks
             )
-            await self.event_sender.send(
+            await self._queue_control_event(
                 instance_failure_event(
                     instance,
                     error_code="download_failed",
@@ -3172,7 +3226,7 @@ class Master:
                     ForwarderDownloadCommand(origin=self._system_id, command=cmd)
                 )
             for event in transition_events:
-                await self.event_sender.send(event)
+                await self._queue_control_event(event)
             # Recovery CONSUMES the terminal failure record: reset each failed
             # node's download status for this model back to Pending. Without
             # this, the stale DownloadFailed lingers in session state and this
@@ -3194,7 +3248,7 @@ class Master:
                 )
                 if shard is None:
                     continue
-                await self.event_sender.send(
+                await self._queue_control_event(
                     NodeDownloadProgress(
                         download_progress=DownloadPending(
                             node_id=node_id,
@@ -3301,7 +3355,7 @@ class Master:
             for event in get_transition_events(
                 self.state.instances, final_placement, self.state.tasks
             ):
-                await self.event_sender.send(event)
+                await self._queue_control_event(event)
             return
         logger.warning(
             "Intelligent fabric is enabled but no configured steward model "
@@ -3336,6 +3390,7 @@ class Master:
                 self._telemetry_view.node_system,
                 self._telemetry_view.node_resources,
                 node_memory=placement_memory,
+                current_instances=self._placement_reservations(current_instances),
             )
         )
         return place_instance(
@@ -3416,7 +3471,16 @@ class Master:
             if isinstance(total_bytes, int) and total_bytes > 0:
                 credited_bytes = min(total_bytes, credited_bytes)
             vram[node_id] = Memory.from_bytes(credited_bytes)
-        return memory, vram
+        return memory, reserve_instance_vram(
+            vram,
+            self._telemetry_view.node_system,
+            {
+                identifier: instance
+                for identifier, instance in self.state.instances.items()
+                if identifier != current.instance_id
+            },
+            unified_memory_gpu_nodes=unified_nodes,
+        )
 
     def _reset_steward_upgrade(self) -> None:
         """Forget one in-progress best-brain convergence attempt."""
@@ -3589,7 +3653,7 @@ class Master:
         the same steps the ordinary DeleteInstance path performs.
         """
         for task_failed in orphaned_task_failure_events(self.state, set(instance_ids)):
-            await self.event_sender.send(task_failed)
+            await self._queue_control_event(task_failed)
         survivors = dict(self.state.instances)
         for instance_id in instance_ids:
             survivors = delete_instance(
@@ -3602,7 +3666,7 @@ class Master:
         for event in get_transition_events(
             self.state.instances, survivors, self.state.tasks
         ):
-            await self.event_sender.send(event)
+            await self._queue_control_event(event)
 
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
