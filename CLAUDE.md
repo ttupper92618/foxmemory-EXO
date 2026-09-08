@@ -522,6 +522,12 @@ fallback. `VITE_TOLGEE_AVAILABLE_LANGUAGES` is a comma-separated build-time
 language list; English is always included.
 
 ### Model Capability System
+
+`GET /models/requirements` exposes advisory whole-model sizing and a complete
+card-content digest from the same effective catalog/installed precedence as
+`/models`. Missing KV geometry returns a null estimate. It does not reserve or
+place resources; controllers must repeat identity and live compatibility checks.
+
 Skulk now treats model capability handling as two layers:
 - **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `tooling`, and `runtime` sections for refined model support
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults

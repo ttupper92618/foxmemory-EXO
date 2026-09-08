@@ -122,3 +122,21 @@ Use [Node Doctor](node-doctor.md) for node-level diagnosis and the
 [API guide](api-guide.md#cluster-state) for state inspection.
 Store raw provider and process evidence in protected controller storage;
 publish sanitized operational outcomes rather than credentials or payloads.
+
+
+## Plan capacity for an exact model
+
+Before selecting external capacity, call [`GET /models/requirements`](./api-guide.md#read-model-capacity-requirements)
+with the requested `model_id` and per-sequence `context_tokens`. It returns the
+catalog's effective installed-card binding, core's advisory whole-model memory
+estimate, declared disk bytes and backend evidence. Preserve the requested model
+and context in approved intent. A null memory estimate means missing sizing
+information, not zero memory. Account separately for runtime images, staging and
+other disk use, and do not combine multiple GPUs into one capacity figure without
+engine support for that layout.
+
+The requirements read reserves nothing. Catalog/store caches can outlive a live
+configuration change, and pre-provision estimates do not prove future placement.
+Repeat card identity and compatibility checks against the target environment;
+then observe exact placement, download, runner and inference evidence as described
+above. Provider offers and budget enforcement belong to the external controller.

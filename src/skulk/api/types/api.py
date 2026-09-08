@@ -1,6 +1,6 @@
 import time
 from collections.abc import Generator
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal, final, get_args
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -106,6 +106,64 @@ class ErrorInfo(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorInfo
+
+
+@final
+class ModelRequirements(BaseModel):
+    """Advisory whole-model requirements from effective catalog metadata.
+
+    A result reserves no resources and grants no execution authority. Joined
+    node compatibility, current artifact identity and placement admission must
+    still be checked before loading a runner.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str = Field(description="Exact selectable model alias.")
+    card_digest: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="SHA-256 of canonical card JSON excluding registry_snapshot_id.",
+    )
+    registry_card_id: str | None = Field(
+        description="Signed card identity, when present."
+    )
+    context_tokens: int = Field(
+        ge=1, description="Requested per-sequence context budget."
+    )
+    context_limit: int | None = Field(
+        description="Advertised card context limit; null when unknown."
+    )
+    storage_bytes: int = Field(
+        ge=0,
+        description="Card weight bytes plus a declared GGUF vision projector; excludes runtime image, staging and caches.",
+    )
+    estimated_memory_bytes: int | None = Field(
+        ge=0,
+        description="Whole-model core footprint at the requested context; null when text KV geometry is unavailable or the task is not text generation.",
+    )
+    discrete_gpu_memory_fraction: float = Field(
+        gt=0,
+        le=1,
+        description="Core fraction of discrete VRAM usable for the estimated footprint; do not sum GPU memory without supported sharding.",
+    )
+    unified_memory_fraction: float = Field(
+        gt=0,
+        le=1,
+        description="Core Apple unified-memory working-set fraction of total RAM.",
+    )
+    compatible_backends: tuple[str, ...] = Field(
+        description="Declared backend tags; live platform and runner constraints still apply."
+    )
+    engine_support: tuple[RegistryEngineSupportClaim, ...] = Field(
+        description="Matching signed engine claims; status, exact build and hardware constraints remain authoritative."
+    )
+    incomplete_capabilities: tuple[str, ...] = Field(
+        description="Artifact capabilities explicitly marked incomplete; these block admission."
+    )
+    estimate_only: Literal[True] = Field(
+        default=True,
+        description="Estimates are neither measured fit nor a placement or spending authorization.",
+    )
 
 
 class ModelListModel(BaseModel):

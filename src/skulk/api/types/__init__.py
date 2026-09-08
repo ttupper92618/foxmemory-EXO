@@ -67,6 +67,7 @@ from .api import LogprobsContentItem as LogprobsContentItem
 from .api import ModalitiesCapabilitySection as ModalitiesCapabilitySection
 from .api import ModelList as ModelList
 from .api import ModelListModel as ModelListModel
+from .api import ModelRequirements as ModelRequirements
 from .api import NodePowerStats as NodePowerStats
 from .api import NodeStorageSummary as NodeStorageSummary
 from .api import OpenUrlToolRequest as OpenUrlToolRequest

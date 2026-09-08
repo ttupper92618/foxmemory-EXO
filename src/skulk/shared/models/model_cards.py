@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -735,6 +736,28 @@ def same_authorized_model_card(candidate: "ModelCard", authorized: "ModelCard") 
     return candidate.model_dump(exclude={"registry_snapshot_id"}) == (
         authorized.model_dump(exclude={"registry_snapshot_id"})
     )
+
+
+def authorized_model_card_digest(card: "ModelCard") -> str:
+    """Return the SHA-256 binding for complete authorized card contents.
+
+    Args:
+        card: Effective catalog or installed model card to bind.
+
+    Returns:
+        Hex digest of sorted, compact ASCII JSON using snake-case field names,
+        excluding only the publication snapshot. This follows
+        ``same_authorized_model_card``; a copied registry ID cannot hide changes
+        to executable metadata. It is a content binding, not a signature.
+    """
+    payload = json.dumps(
+        card.model_dump(mode="json", by_alias=False, exclude={"registry_snapshot_id"}),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:

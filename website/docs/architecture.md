@@ -1876,3 +1876,16 @@ The trusted steward extension facet reads the current intelligent-fabric mode an
 collection and dispatch recheck it; private approved-action adapters must also
 recheck it on every dispatch or retry. The callback supplies no approval evidence
 or signing authority, and omitted callbacks fail closed.
+
+
+### Advisory model requirements
+
+`GET /models/requirements` reads the same effective catalog and installed-card
+precedence as `/models`. It binds complete card contents with
+`authorized_model_card_digest` (all JSON-mode fields except the publication
+snapshot) and uses `estimate_shard_footprint` for whole-model text memory at the
+requested context. Unknown KV geometry produces a null estimate. The response
+also exposes declared storage, backend evidence and core working-set fractions;
+it performs no placement, download, reservation or external-provider action.
+External controllers must revalidate identity and live admission before execution.
+See [API contract](./api-guide.md#read-model-capacity-requirements).

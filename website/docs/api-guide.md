@@ -1487,6 +1487,59 @@ air-gapped use. A hash-bound support matrix that was previously TUF-verified is
 also usable offline; it never converts an experimental or negative decision
 into placement permission.
 
+### Read model capacity requirements
+
+**GET** `/models/requirements`
+
+Query parameters:
+
+| Parameter | Required | Behavior |
+|---|---|---|
+| `model_id` | Yes | Exact known selectable alias, 1–512 characters. Unknown aliases return 404; lookup never discovers or authorizes a repository. |
+| `context_tokens` | No | Integer 1–1,048,576, default 8192, per sequence. A request above the card's advertised positive context limit returns 422; it is never silently reduced. |
+
+```bash
+curl --get http://localhost:52415/models/requirements \
+  --data-urlencode 'model_id=organization/model' \
+  --data-urlencode 'context_tokens=8192'
+```
+
+The response uses snake-case fields. It selects the same effective card as
+`/models`, including central-store installed generations, local fallback, custom
+overrides and qualification-card visibility. Store outages may retain the same
+last-known installed snapshot as the catalog; this read is not a freshness or
+placement guarantee.
+
+- `model_id`, nullable `registry_card_id`, and `card_digest` bind the selected
+  card. The digest is SHA-256 of its JSON-mode model dump with snake-case names,
+  sorted keys, compact separators, ASCII escapes and no non-finite values,
+  excluding only `registry_snapshot_id`. It includes complete card contents,
+  even when a signed card ID exists. It is a content binding, not a signature.
+- `context_tokens` echoes the requested budget; `context_limit` is the advertised
+  card limit or null when unknown.
+- `storage_bytes` includes declared weight bytes and a declared GGUF vision
+  projector. Runtime images, download staging, caches and other disk headroom
+  require separate accounting.
+- `estimated_memory_bytes` uses core's whole-model footprint estimate at that
+  context. It is null for non-text-generation tasks or missing KV geometry.
+  Known geometry still uses core's head-dimension and KV-dtype assumptions;
+  an estimate is not a measured load guarantee.
+- `discrete_gpu_memory_fraction` and `unified_memory_fraction` expose core's
+  usable discrete-VRAM and Apple RAM working-set fractions. Compare the
+  estimated footprint to usable capacity; summing device memory does not prove
+  that the engine supports the required sharding.
+- `compatible_backends` contains declared tags; `engine_support` contains matching
+  signed claims whose status, exact build and hardware restrictions still apply.
+  `incomplete_capabilities` reports artifact evidence that blocks admission.
+- `estimate_only` is always true. No resource reservation, spending approval,
+  download or placement occurs.
+
+External controllers must bind their approved workload to the returned card
+identity and context, recheck that identity before execution, and use the joined
+node's compatibility, placement admission and runner readiness as runtime proof.
+A registry alias can change between planning and execution. See
+[External controller integration](./controller-integration.md).
+
 ### Legacy repository-code approvals
 
 **GET** `/models/remote-code-approvals`
