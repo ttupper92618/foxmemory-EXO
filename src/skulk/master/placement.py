@@ -85,7 +85,11 @@ from skulk.shared.types.worker.instances import (
     instance_meta_of,
 )
 from skulk.shared.types.worker.runners import ShardAssignments
-from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
+from skulk.shared.types.worker.shards import (
+    RpcDonorShardMetadata,
+    Sharding,
+    TensorShardMetadata,
+)
 
 # Ring/coordinator/donor listener ports are drawn from a band BELOW every
 # OS's default ephemeral range: macOS assigns outgoing-connection local ports
@@ -233,6 +237,7 @@ def add_instance_to_placements(
         assignments = assignments.model_copy(
             update={"runner_to_shard": resolved_shards}
         )
+    assignments = _stamp_llama_server_settings(assignments, node_resources or {})
     fixed_memory_by_node: dict[NodeId, Memory] = {}
     first_shard = next(iter(assignments.runner_to_shard.values()), None)
     if first_shard is not None:
@@ -290,10 +295,42 @@ def add_instance_to_placements(
                 context_budget=ceiling
                 if ceiling is not None
                 else KV_CONTEXT_BUDGET_TOKENS,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
             )
             if ceiling == 0 or footprint > available:
                 raise PlacementError("Insufficient GPU memory for the exact placement")
     return {**current_instances, instance.instance_id: instance}
+
+
+def _stamp_llama_server_settings(
+    assignments: ShardAssignments, resources_by_node: Mapping[NodeId, NodeResources]
+) -> ShardAssignments:
+    shards = dict(assignments.runner_to_shard)
+    has_rpc_donors = any(
+        isinstance(shard, RpcDonorShardMetadata) for shard in shards.values()
+    )
+    for node_id, runner_id in assignments.node_to_runner.items():
+        shard = shards[runner_id]
+        if isinstance(shard, RpcDonorShardMetadata):
+            # Donors provide memory to the driver's one context; they do not
+            # launch a served instance with their own parallel-slot controls.
+            continue
+        if not has_rpc_donors and (
+            shard.resolved_backend is None
+            or not shard.resolved_backend.startswith("llama_server")
+        ):
+            continue
+        resources = resources_by_node.get(node_id)
+        settings = resources.llama_server_settings if resources is not None else None
+        if settings is None and shard.model_card.gguf_cache_geometry is not None:
+            raise PlacementError(
+                "Serving settings are required for recurrent memory admission"
+            )
+        # Exact requests cannot substitute client-supplied slot settings for the
+        # node's observation. The worker verifies this stamp before spawning.
+        shards[runner_id] = shard.model_copy(update={"llama_server_settings": settings})
+    return assignments.model_copy(update={"runner_to_shard": shards})
 
 
 def _get_node_download_fraction(
@@ -920,6 +957,20 @@ def place_instance(
             command.sharding,
             node_vram=node_vram,
             fixed_memory_by_node=standard_fixed,
+            resolved_backends={
+                node_id: resolve_node_backend(
+                    _card_platform_backends(command.model_card, resources),
+                    command.model_card.placement.backend_preference,
+                    resources.backends,
+                )
+                for node_id in standard_cycle.node_ids
+                if (resources := resolved_node_resources.get(node_id)) is not None
+            },
+            llama_server_settings={
+                node_id: resources.llama_server_settings
+                for node_id in standard_cycle.node_ids
+                if (resources := resolved_node_resources.get(node_id)) is not None
+            },
         )
         cycles_with_sufficient_memory.extend(standard_fit)
         memory_diagnostics.pending_info_node_ids.extend(
@@ -978,6 +1029,18 @@ def place_instance(
                 node_vram=rpc_vram_map,
                 exact_pipeline_layers=False,
                 fixed_memory_by_node=rpc_fixed,
+                resolved_backends={
+                    node_id: "llama_server" for node_id in rpc_cycle.node_ids
+                },
+                llama_server_settings={
+                    node_id: (
+                        resources.llama_server_settings
+                        if (resources := resolved_node_resources.get(driver))
+                        is not None
+                        else None
+                    )
+                    for node_id in rpc_cycle.node_ids
+                },
             )
             cycles_with_sufficient_memory.extend(rpc_fit)
             if rpc_fit:
@@ -1177,6 +1240,10 @@ def place_instance(
         model_id=shard_assignments.model_id,
         runner_to_shard=stamped_runner_to_shard,
         node_to_runner=shard_assignments.node_to_runner,
+    )
+
+    shard_assignments = _stamp_llama_server_settings(
+        shard_assignments, resolved_node_resources
     )
 
     # Stamp the context-admission ceiling into the placement decision (#279

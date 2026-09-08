@@ -1127,7 +1127,12 @@ class Master:
             fraction = shard_fraction_of_model(shard)
             if fraction is None or fraction <= 0.0:
                 continue
-            footprint = estimate_shard_footprint(shard.model_card, fraction)
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+            )
             self._recently_freed_bytes.setdefault(node_id, []).append(
                 (footprint.in_bytes, deadline)
             )
@@ -3468,7 +3473,12 @@ class Master:
             fraction = shard_fraction_of_model(shard)
             if fraction is None or fraction <= 0.0:
                 continue
-            footprint = estimate_shard_footprint(shard.model_card, fraction)
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+            )
             credit[node_id] = credit.get(node_id, 0) + footprint.in_bytes
         memory = {
             node_id: (

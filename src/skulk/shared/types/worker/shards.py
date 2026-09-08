@@ -3,6 +3,7 @@ from typing import TypeAlias, final
 
 from pydantic import Field
 
+from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.model_cards import ModelCard
 from skulk.utils.pydantic_ext import TaggedModel
 
@@ -31,6 +32,10 @@ class BaseShardMetadata(TaggedModel):
     # lacked the node's resources at placement); the worker then falls back to
     # its local backend probe. See #330.
     resolved_backend: str | None = None
+    llama_server_settings: LlamaServerSettings | None = Field(
+        default=None,
+        description="Node serving settings captured by placement for memory admission.",
+    )
 
     # Error handling; equivalent to monkey-patch, but we can't monkey-patch runner.py
     # This is kinda annoying because it allocates memory in the ShardMetadata object. Can be rethought after Shanghai.

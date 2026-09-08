@@ -45,6 +45,7 @@ from skulk.shared.constants import (
     SKULK_MODELS_DIRS,
     SKULK_OFFLINE,
 )
+from skulk.shared.models.gguf_memory import GgufCacheGeometry, qwen35_cache_geometry
 from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
     RegistryAdvisory,
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
 # whatever that generator got wrong (the fresh-fleet audit found exactly that:
 # pre-#652-fix cards forcing serial in-process llama_cpp over the served
 # engine).
-CARD_GENERATOR_REVISION: Final[int] = 2
+CARD_GENERATOR_REVISION: Final[int] = 3
 
 # kinda ugly...
 # TODO: load search path from config.toml
@@ -1903,6 +1904,14 @@ class ModelCard(CamelCaseModel):
     num_key_value_heads: PositiveInt | None = None
     """KV-head count for grouped-query attention, used in KV-cache sizing. ``None``
     when unknown/not applicable."""
+    gguf_cache_geometry: GgufCacheGeometry | None = None
+    """Artifact-derived attention and recurrent cache dimensions for GGUF admission.
+
+    This is intrinsic model metadata. Slot count, speculation and runtime buffer
+    overhead are separate engine inputs. An absent value means unknown, never
+    zero recurrent cost; registry cards require a newly signed metadata revision
+    to add it without changing their accepted identity silently.
+    """
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
     ``TextToImage``, ``ImageToImage``, ``TextToSpeech``, ``SpeechToText``,
@@ -2141,6 +2150,20 @@ class ModelCard(CamelCaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_gguf_cache_geometry(self) -> "ModelCard":
+        """Keep artifact-derived cache dimensions attached to the matching layer set."""
+        geometry = self.gguf_cache_geometry
+        if geometry is not None and (
+            self.gguf_file is None
+            or geometry.attention_layers
+            + geometry.recurrent_layers
+            + geometry.nextn_layers
+            != self.n_layers
+        ):
+            raise ValueError("GGUF cache geometry must match the artifact layer count")
+        return self
+
     @field_validator("tasks", mode="before")
     @classmethod
     def _validate_tasks(cls, v: list[str | ModelTask]) -> list[ModelTask]:
@@ -2308,11 +2331,9 @@ class ModelCard(CamelCaseModel):
 
         Sizes the weights from the GGUF file the runner would actually load
         (`select_gguf_file` picks the first sorted file + its shard group).
-        Structural fields come from `config.json` when the repo ships one (most
-        community GGUF repos do); a bare repo with no usable config.json has its
-        metadata read straight from the selected GGUF file's binary header via a
-        ranged read of the file start (#327), so neither path fabricates the
-        layer/hidden sizes placement's memory and KV-budget math depend on.
+        Structural fields come from the selected GGUF binary header through
+        ranged reads. Repository config remains a source of vision metadata,
+        but cannot override the artifact's layer count or cache dimensions.
         Stamps the llama.cpp backend tags so placement routes the model only to
         nodes with a llama.cpp engine and prefers a GPU backend.
         """
@@ -2339,40 +2360,21 @@ class ModelCard(CamelCaseModel):
         except (FileNotFoundError, ValidationError):
             config_data = None
 
-        if (
-            config_data is not None
-            and config_data.layer_count
-            and (config_data.hidden_size)
-        ):
-            n_layers = config_data.layer_count
-            hidden_size = config_data.hidden_size
-            num_key_value_heads = config_data.num_key_value_heads
-            context_length = config_data.max_position_embeddings or 0
-        else:
-            # No usable config.json: read the structural fields from the GGUF
-            # binary header. ``selected`` is the first shard, which carries the
-            # metadata block, so a ranged read of its start is enough.
-            reason = "absent" if config_data is None else "missing layer/hidden sizes"
-            logger.info(
-                f"GGUF repo {model_id} config.json {reason}; reading model "
-                f"metadata from the GGUF header of {selected}"
+        # A repository config can describe the base checkpoint rather than the
+        # selected GGUF (notably omitting embedded NextN layers). Read artifact
+        # dimensions even when that config exists; retain it for vision metadata.
+        from skulk.download.download_utils import range_read
+
+        async def _fetch(offset: int, length: int) -> bytes:
+            return await range_read(
+                model_id, source_revision or "main", selected, offset, length
             )
-            from skulk.download.download_utils import range_read
 
-            async def _fetch(offset: int, length: int) -> bytes:
-                return await range_read(
-                    model_id,
-                    source_revision or "main",
-                    selected,
-                    offset,
-                    length,
-                )
-
-            fields = await read_gguf_structural_fields(_fetch)
-            n_layers = fields.n_layers
-            hidden_size = fields.hidden_size
-            num_key_value_heads = fields.num_key_value_heads
-            context_length = fields.context_length
+        fields = await read_gguf_structural_fields(_fetch)
+        n_layers = fields.n_layers
+        hidden_size = fields.hidden_size
+        num_key_value_heads = fields.num_key_value_heads
+        context_length = fields.context_length
 
         # Mark the card vision-capable so the llama.cpp runner loads the mmproj
         # projector (#128, #346). Prefer the rich config.json vision_config when
@@ -2401,6 +2403,7 @@ class ModelCard(CamelCaseModel):
             # llama.cpp runs single-node in Skulk (no tensor parallelism).
             supports_tensor=False,
             num_key_value_heads=num_key_value_heads,
+            gguf_cache_geometry=fields.cache_geometry,
             context_length=context_length,
             tasks=[ModelTask.TextGeneration],
             quantization=_gguf_quant_label(selected),
@@ -2989,6 +2992,7 @@ class GgufStructuralFields(NamedTuple):
     hidden_size: int
     num_key_value_heads: int | None
     context_length: int
+    cache_geometry: GgufCacheGeometry | None = None
 
 
 class _GgufHeaderReader:
@@ -3103,6 +3107,7 @@ class _GgufHeaderReader:
 
         architecture: str | None = None
         collected: dict[str, int] = {}
+        recurrent_layer_override = False
 
         def _has(suffixes: "tuple[str, ...]") -> bool:
             return architecture is not None and all(
@@ -3117,6 +3122,8 @@ class _GgufHeaderReader:
             # tokenizer array for best-effort fields that are simply absent.
             if key.startswith("tokenizer.") and _has(_GGUF_REQUIRED_SUFFIXES):
                 break
+            if key.endswith(".attention.recurrent_layers"):
+                recurrent_layer_override = True
             value = await self.read_value(await self._u32())
             if key == "general.architecture" and isinstance(value, str):
                 architecture = value
@@ -3124,7 +3131,10 @@ class _GgufHeaderReader:
                 collected[key] = value
             # Fast path: every wanted key (including best-effort ones) is in,
             # before any tokenizer array.
-            if _has(_GGUF_WANTED_SUFFIXES):
+            # Hybrid metadata follows the basic dimensions. Stopping at the
+            # first four scalars loses its fixed recurrent-state allocation and
+            # can also miss an explicit layer vector overriding the interval.
+            if architecture != "qwen35" and _has(_GGUF_WANTED_SUFFIXES):
                 break
 
         if architecture is None:
@@ -3145,6 +3155,15 @@ class _GgufHeaderReader:
             hidden_size=hidden_size,
             num_key_value_heads=field(_GGUF_KEY_HEAD_COUNT_KV) or None,
             context_length=field(_GGUF_KEY_CONTEXT_LENGTH) or 0,
+            cache_geometry=qwen35_cache_geometry(
+                architecture,
+                {
+                    key.removeprefix(architecture + "."): value
+                    for key, value in collected.items()
+                    if key.startswith(architecture + ".")
+                },
+                has_recurrent_layer_override=recurrent_layer_override,
+            ),
         )
 
 

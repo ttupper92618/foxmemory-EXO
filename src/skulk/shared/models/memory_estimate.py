@@ -19,6 +19,10 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from typing import Final
 
+from skulk.shared.models.llama_server_settings import (
+    LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
+    LlamaServerSettings,
+)
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -127,6 +131,10 @@ def estimate_kv_cache_bytes(
 ) -> Memory:
     """Estimate KV-cache bytes for ``n_layers`` layers at ``context_tokens``.
 
+    A GGUF cache geometry uses its actual attention layers and widths, scaled
+    by the requested layer fraction. It does not fold recurrent state into KV.
+    Without that geometry the legacy approximation below remains in use.
+
     The cache holds a key and a value vector per token, per layer, each sized
     ``num_key_value_heads * head_dim``::
 
@@ -137,11 +145,13 @@ def estimate_kv_cache_bytes(
     non-positive — the weight-overhead factor must absorb the slack then.
     ``head_dim`` falls back to ``KV_HEAD_DIM_FALLBACK`` (cards omit it).
     """
-    kv_heads = model_card.num_key_value_heads
-    if kv_heads is None or context_tokens <= 0 or n_layers <= 0:
+    if context_tokens <= 0 or n_layers <= 0:
         return Memory()
     kv_bytes = (
-        2 * n_layers * context_tokens * kv_heads * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES
+        per_token_kv_bytes(model_card)
+        * n_layers
+        * context_tokens
+        // model_card.n_layers
     )
     return Memory.from_bytes(kv_bytes)
 
@@ -150,10 +160,13 @@ def estimate_shard_footprint(
     model_card: ModelCard,
     shard_fraction: float,
     context_budget: int = KV_CONTEXT_BUDGET_TOKENS,
+    *,
+    resolved_backend: str | None = None,
+    llama_server_settings: LlamaServerSettings | None = None,
 ) -> Memory:
     """Estimate resident memory for a shard holding ``shard_fraction`` of a model.
 
-    ``weights_share * MEMORY_OVERHEAD_FACTOR + kv_share + MEMORY_OVERHEAD_FLOOR``
+    ``weights_share * overhead + kv_share + recurrent_share + overhead_floor``
     where weights and KV both scale by ``shard_fraction``. That single fraction
     works for every sharding because both quantities are linear in it:
 
@@ -163,15 +176,31 @@ def estimate_shard_footprint(
       ``1/world_size`` of each weight matrix and of the KV heads).
 
     ``shard_fraction == 1.0`` gives the whole-model footprint (single node).
+    ``resolved_backend`` and ``llama_server_settings`` select the actual engine's
+    slot and speculation costs; omitted settings use the shipped server defaults
+    for advisory planning. Persisted placements supply their stamped settings.
     """
     if shard_fraction <= 0.0:
         return Memory()
     weights_share = model_card.storage_size * shard_fraction
-    full_kv = estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
+    full_kv = Memory.from_bytes(
+        per_token_kv_bytes(
+            model_card,
+            resolved_backend=resolved_backend,
+            llama_server_settings=llama_server_settings,
+        )
+        * max(0, context_budget)
+    )
     kv_share = full_kv * shard_fraction
     footprint = (
         weights_share * memory_overhead_factor(model_card)
         + kv_share
+        + estimate_recurrent_cache_bytes(
+            model_card,
+            resolved_backend=resolved_backend,
+            llama_server_settings=llama_server_settings,
+        )
+        * shard_fraction
         + MEMORY_OVERHEAD_FLOOR
     )
     # A single-node GGUF vision runner owns the complete projector in addition
@@ -265,14 +294,86 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
     ) and not resolved_backend.endswith("-cpu")
 
 
-def per_token_kv_bytes(model_card: ModelCard) -> int:
+def _served_speculative_mode(
+    model_card: ModelCard,
+    resolved_backend: str | None,
+    settings: LlamaServerSettings,
+) -> str | None:
+    if (
+        not settings.speculation_enabled
+        or (
+            resolved_backend is not None
+            and not resolved_backend.startswith("llama_server")
+        )
+        or model_card.runtime is None
+    ):
+        return None
+    return model_card.runtime.served_spec_type
+
+
+def estimate_recurrent_cache_bytes(
+    model_card: ModelCard,
+    *,
+    resolved_backend: str | None = None,
+    llama_server_settings: LlamaServerSettings | None = None,
+) -> Memory:
+    """Return fixed FP32 recurrent state for the configured llama.cpp instance.
+
+    Unknown geometry retains the legacy approximation; it must not be described
+    as a proven zero-cost recurrent model. Non-llama engines use their own memory
+    contract. Unresolved planning uses shipped llama-server settings.
+    """
+    geometry = model_card.gguf_cache_geometry
+    if geometry is None or (
+        resolved_backend is not None
+        and not resolved_backend.startswith(("llama_cpp", "llama_server"))
+    ):
+        return Memory()
+    settings = llama_server_settings or LlamaServerSettings()
+    mode = _served_speculative_mode(model_card, resolved_backend, settings)
+    depth = (
+        (model_card.runtime.served_spec_n_max or LLAMA_SERVER_DEFAULT_DRAFT_DEPTH)
+        if mode in ("draft_mtp", "draft_eagle3", "draft_dflash")
+        and model_card.runtime is not None
+        else 0
+    )
+    slots = (
+        1
+        if resolved_backend is not None and resolved_backend.startswith("llama_cpp")
+        else settings.effective_slots(
+            speculative_vision=model_card.vision is not None
+            and mode not in (None, "none")
+        )
+    )
+    return Memory.from_bytes(
+        geometry.recurrent_bytes(parallel_slots=slots, rollback_depth=depth)
+    )
+
+
+def per_token_kv_bytes(
+    model_card: ModelCard,
+    *,
+    resolved_backend: str | None = None,
+    llama_server_settings: LlamaServerSettings | None = None,
+) -> int:
     """Whole-model KV-cache bytes consumed by ONE token of context.
 
-    Covers all layers at fp16 (``KV_DTYPE_BYTES``); a node holding
+    Uses artifact attention geometry when present, including embedded MTP only
+    for a speculative served instance. Otherwise covers all layers at fp16
+    (``KV_DTYPE_BYTES``); a node holding
     ``shard_fraction`` of the model pays ``per_token_kv_bytes * shard_fraction``
     per token. Returns 0 when the card lacks ``num_key_value_heads`` —
     callers must treat 0 as "KV cost unknown, cannot enforce a memory ceiling".
     """
+    geometry = model_card.gguf_cache_geometry
+    if geometry is not None and (
+        resolved_backend is None
+        or resolved_backend.startswith(("llama_cpp", "llama_server"))
+    ):
+        mode = _served_speculative_mode(
+            model_card, resolved_backend, llama_server_settings or LlamaServerSettings()
+        )
+        return geometry.attention_bytes_per_token(embedded_mtp=mode == "draft_mtp")
     kv_heads = model_card.num_key_value_heads
     if kv_heads is None or model_card.n_layers <= 0:
         return 0
@@ -361,21 +462,38 @@ def instance_context_token_limit(
         for shard in shard_assignments.runner_to_shard.values()
     )
 
-    whole_model_token_bytes = per_token_kv_bytes(model_card)
-    if whole_model_token_bytes > 0:
+    if per_token_kv_bytes(model_card) > 0:
         node_to_runner = shard_assignments.node_to_runner
         for node_id, runner_id in node_to_runner.items():
             shard = shard_assignments.runner_to_shard[runner_id]
+            whole_model_token_bytes = per_token_kv_bytes(
+                model_card,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+            )
             fraction = shard_fraction_of_model(shard)
             ram_total = node_ram_totals.get(node_id)
-            if fraction is None or fraction <= 0.0 or ram_total is None:
+            if (
+                fraction is None
+                or fraction <= 0.0
+                or ram_total is None
+                or whole_model_token_bytes <= 0
+            ):
                 memory_limit = None
                 break
             working_set = node_vram.get(node_id) or gpu_working_set_ceiling(ram_total)
             kv_budget = (
                 working_set
-                - model_card.storage_size * fraction * memory_overhead_factor(model_card)
+                - model_card.storage_size
+                * fraction
+                * memory_overhead_factor(model_card)
                 - MEMORY_OVERHEAD_FLOOR
+                - estimate_recurrent_cache_bytes(
+                    model_card,
+                    resolved_backend=shard.resolved_backend,
+                    llama_server_settings=shard.llama_server_settings,
+                )
+                * fraction
                 - fixed_memory_by_node.get(node_id, Memory())
             )
             node_tokens = max(

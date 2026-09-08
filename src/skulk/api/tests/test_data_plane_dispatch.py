@@ -107,23 +107,25 @@ async def test_state_surfaces_split_data_transport_health() -> None:
     payload = await api.get_cluster_state()
 
     assert payload["nodeResources"] == {
-            "remote-management-node": {
-                "backends": [],
-                "engineBuilds": {},
-                "hardwareClasses": [],
-                "participation": "management",
-                "apiAvailable": True,
-                "dataTransport": "zenoh",
+        "remote-management-node": {
+            "backends": [],
+            "engineBuilds": {},
+            "llamaServerSettings": None,
+            "hardwareClasses": [],
+            "participation": "management",
+            "apiAvailable": True,
+            "dataTransport": "zenoh",
             "zenohConnectedPeers": None,
             "capabilityConflicts": [],
         },
-            "worker-node": {
-                "backends": ["mlx"],
-                "engineBuilds": {},
-                "hardwareClasses": [],
-                "participation": "full",
-                "apiAvailable": True,
-                "dataTransport": "gossipsub",
+        "worker-node": {
+            "backends": ["mlx"],
+            "engineBuilds": {},
+            "llamaServerSettings": None,
+            "hardwareClasses": [],
+            "participation": "full",
+            "apiAvailable": True,
+            "dataTransport": "gossipsub",
             "zenohConnectedPeers": None,
             "capabilityConflicts": [],
         },

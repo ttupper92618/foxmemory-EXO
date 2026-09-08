@@ -44,6 +44,11 @@ from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.constants import MAX_OUTPUT_TOKENS
 from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.llama_server_settings import (
+    LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
+    LLAMA_SERVER_DEFAULT_PARALLEL,
+    resolve_llama_server_settings,
+)
 from skulk.shared.models.model_cards import ModelCard, OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -150,12 +155,7 @@ def _force_no_spec() -> bool:
     MTP on-vs-off throughput comparison and for debugging a misbehaving spec
     pairing; unset in normal operation.
     """
-    return os.environ.get("SKULK_LLAMA_SERVER_FORCE_NO_SPEC", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return not resolve_llama_server_settings(os.environ).speculation_enabled
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
@@ -164,7 +164,7 @@ _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
 # Sixteen is the exercised fleet setting. A unified KV buffer keeps every slot's
 # advertised context window truthful without allocating N private caches; users
 # dominated by near-window prompts can still opt back to serial explicitly.
-_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 16
+_DEFAULT_LLAMA_SERVER_PARALLEL: Final = LLAMA_SERVER_DEFAULT_PARALLEL
 # An omitted OpenAI ``max_tokens`` value otherwise lets llama-server consume the
 # remainder of the shared KV pool. Bound it to the same normal-generation width
 # as Skulk's MLX path so aggregate admission has a finite reservation and one
@@ -218,7 +218,7 @@ def _llama_server_parallel() -> int:
             f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
         )
         return _DEFAULT_LLAMA_SERVER_PARALLEL
-    return value
+    return resolve_llama_server_settings(os.environ).parallel_slots
 
 
 def _request_context_reservation(
@@ -653,6 +653,13 @@ class Runner(ServedConcurrentDispatch):
         # _spawn_server) keeps every slot's context at the full stamped window,
         # while the weighted gate below prevents their aggregate reservations
         # from exhausting the one shared pool.
+        settings = self.shard_metadata.llama_server_settings
+        if settings is not None and settings != resolve_llama_server_settings(
+            os.environ
+        ):
+            raise ValueError(
+                "llama-server settings changed since memory admission; re-place the instance"
+            )
         effective_parallel = _effective_server_parallel(self.shard_metadata.model_card)
         self._init_concurrent_dispatch(effective_parallel, "llama-gen")
         if (
@@ -935,9 +942,14 @@ class Runner(ServedConcurrentDispatch):
                 )
                 if draft_args is not None:
                     cmd += ["--spec-type", flag]
-                    n_max = getattr(runtime, "served_spec_n_max", None)
-                    if n_max is not None:
-                        cmd += ["--spec-draft-n-max", str(n_max)]
+                    # Admission reserves rollback rows at this depth. Pass the
+                    # shared default explicitly so an engine upgrade cannot
+                    # silently change the allocation after placement.
+                    n_max = (
+                        getattr(runtime, "served_spec_n_max", None)
+                        or LLAMA_SERVER_DEFAULT_DRAFT_DEPTH
+                    )
+                    cmd += ["--spec-draft-n-max", str(n_max)]
                     cmd += draft_args
 
         self.server_log_path = (

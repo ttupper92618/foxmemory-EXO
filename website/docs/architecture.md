@@ -293,6 +293,17 @@ A snapshot-bootstrap rollout has one operational rule: once a master starts comp
 
 ### Heterogeneous nodes and capability-aware placement
 
+GGUF memory admission separates artifact geometry from node serving settings.
+The selected header supplies attention and recurrent dimensions through
+`GgufCacheGeometry`; generated cards use those artifact dimensions even when a
+repository config describes a different base-layer count. For the supported
+Qwen3.5 scalar layout, admission charges FP32 recurrent state across configured
+slots and rollback rows, plus the target and embedded-MTP attention caches.
+`NodeResources.llama_server_settings` advertises the existing environment
+controls, and placement stamps them into shard metadata. The runner rejects a
+changed stamp before launch. Geometry remains signed card content for registry
+models; loading a card does not silently enrich or replace its accepted identity.
+
 A cluster can mix node types: Apple Silicon nodes serving MLX models and
 non-Mac (for example AMD/Linux) nodes serving GGUF models through llama.cpp.
 Placement is capability-aware so each model runs only where it can.

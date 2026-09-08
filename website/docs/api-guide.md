@@ -561,6 +561,16 @@ The mounted model must also declare `TextGeneration`; speech-only cards return
 
 ### Context-length limits
 
+GGUF cards may include `gguf_cache_geometry`, derived from the selected artifact's
+header, to distinguish per-token attention cache from fixed recurrent state.
+For supported hybrid layouts, memory requirements include FP32 recurrent buffers
+for each serving slot and speculative rollback row. Embedded MTP adds its own
+attention layers without charging a second copy of the target weights.
+`NodeResources.llama_server_settings` reports the slot count and speculation
+override; placement captures those settings on each served shard. A settings
+change requires a new placement before the runner can start. Missing geometry
+retains the legacy estimate and is not proof that recurrent state costs zero.
+
 Ordinary text requests prefer ready or running placements over placements still
 loading. Among equally ready placements, ordinary model instances take precedence
 over the resident steward, then active text-task counts balance requests. Retained

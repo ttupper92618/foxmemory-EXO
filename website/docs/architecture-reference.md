@@ -12,6 +12,14 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **GGUF cache admission:** `shared/models/gguf_memory.py` resolves Qwen3.5 scalar
+  header geometry into fixed FP32 recurrent state and per-token FP16 attention
+  widths. `ModelCard.gguf_cache_geometry` is artifact metadata; unknown layouts
+  remain unknown. `NodeResources.llama_server_settings` carries configured slots
+  and speculation enablement. Placement copies it to served shard metadata;
+  `memory_estimate.py` charges rollback rows separately from weights/KV, and the
+  llama-server runner rejects local settings that differ from the stamp.
+
 ### Master
 
 - **Role:** elects + acts as cluster coordinator; indexes events; plans instance placements; publishes snapshots
