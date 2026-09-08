@@ -1282,3 +1282,13 @@ also exposes declared storage, backend evidence and core working-set fractions;
 it performs no placement, download, reservation or external-provider action.
 External controllers must revalidate identity and live admission before execution.
 See [API contract](./api-guide.md#read-model-capacity-requirements).
+
+
+The requirements response exports `required_capabilities` from the same pure
+`get_model_required_capabilities` resolver used by signed engine admission.
+External planners must cover its entire nonempty set, exact engine build and
+hardware restrictions. Launchable placement previews expose the same complete
+`card_digest` for binding approved requirements to the submitted instance;
+the API/master card checks and resource-derived context ceiling still apply.
+Exact-instance creation does not atomically revalidate topology or backend/build
+support, so controllers must check live node support before and after submission.

@@ -632,7 +632,7 @@ def get_model_engine_support(
     architecture = model_card.registry_architecture
     artifact_format = model_card.registry_artifact_format
 
-    capability_ids = _registry_intrinsic_capability_ids(model_card)
+    capability_ids = get_model_required_capabilities(model_card)
     if (
         model_card.registry_card_id is None
         or model_card.registry_provenance is None
@@ -657,8 +657,17 @@ def get_model_engine_support(
     )
 
 
-def _registry_intrinsic_capability_ids(model_card: "ModelCard") -> frozenset[str]:
-    """Return positively evidenced intrinsic capabilities of one artifact."""
+def get_model_required_capabilities(model_card: "ModelCard") -> frozenset[str]:
+    """Return all positively evidenced intrinsic capabilities required for support.
+
+    Args:
+        model_card: Effective card whose signed capability claims are resolved.
+
+    Returns:
+        Capability identifiers that each proposed engine/build/hardware match
+        must cover. Artifact-incomplete capabilities are excluded here and must
+        independently block admission. No registry fetch or mutation occurs.
+    """
     incomplete_artifact_capabilities = {
         claim.capability_id
         for claim in model_card.registry_capability_claims
@@ -680,7 +689,7 @@ def registry_supported_backends_for_node(
     hardware_classes: AbstractSet[str],
 ) -> frozenset[str]:
     """Resolve signed positive support against one node's live engine inventory."""
-    required_capabilities = _registry_intrinsic_capability_ids(model_card)
+    required_capabilities = get_model_required_capabilities(model_card)
     if not required_capabilities:
         return frozenset()
     support_claims = get_model_engine_support(model_card)

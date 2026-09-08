@@ -3554,3 +3554,34 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 - [Model store guide](model-store)
 - [Architecture overview](architecture)
 - [API Reference](/api/skulk-api)
+
+
+### Bind a placement preview to model requirements
+
+`GET /instance/previews` retains its existing `model_id`, `node_ids` and
+`excluded_node_ids` query parameters. Each preview with an instance now includes
+`card_digest`, using the same canonical complete-card digest as
+`GET /models/requirements`; previews without an instance return null. Before
+submitting `POST /instance`, compare that digest to approved requirements and
+retain the exact returned instance. A matching alias or registry ID alone does
+not establish identical card contents. The preview digest grants no admission:
+the API/master card checks and resource-derived context ceiling still apply.
+The exact-instance creation path does not atomically revalidate current topology
+or backend/build support. Controllers must obtain a fresh target-specific preview,
+verify live node support before submission, and continue checking support and
+readiness afterward; an accepted command alone is not proof of usable capacity.
+
+The requirements response also includes `required_capabilities`, the complete
+positively evidenced intrinsic capability set used by core's signed-engine
+resolver. Matrix-only compatibility requires a nonempty set and supported claims
+covering every member for the proposed backend/engine, exact engine build and
+applicable hardware classes. `incomplete_capabilities` remains an independent
+artifact blocker. One positive claim alone is insufficient. Declared compatible
+backends retain their existing behavior; actual platform/runner admission still
+applies after a node joins.
+
+A controller also checks the preview's `contextTokenLimit` against its approved
+per-sequence context budget and verifies the live accepted instance after
+submission: the master computes the limit from current resources. Keep watching
+the exact instance's card, resolved backend, context capacity and node assignment;
+metadata from a previous preview is not fresh readiness evidence.

@@ -154,6 +154,9 @@ class ModelRequirements(BaseModel):
     compatible_backends: tuple[str, ...] = Field(
         description="Declared backend tags; live platform and runner constraints still apply."
     )
+    required_capabilities: tuple[str, ...] = Field(
+        description="Complete positively evidenced capability set required for signed engine support; an empty set cannot authorize matrix-only admission."
+    )
     engine_support: tuple[RegistryEngineSupportClaim, ...] = Field(
         description="Matching signed engine claims; status, exact build and hardware constraints remain authoritative."
     )
@@ -1673,6 +1676,11 @@ class CreateInstanceParams(BaseModel):
 
 
 class PlacementPreview(BaseModel):
+    card_digest: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Canonical authorized-card content digest used to construct a launchable preview; compare with approved model requirements before submitting the exact instance. Null when no instance is present.",
+    )
     model_id: ModelId
     sharding: Sharding
     instance_meta: InstanceMeta
