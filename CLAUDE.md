@@ -108,6 +108,10 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 
 ### Node Composition
 
+Exact non-RPC placements resolve omitted backends from advertised compatible
+engines before memory admission; restored unstamped GPU-host shards reserve
+conservatively.
+
 Discrete-GPU placement combines observed free memory with committed concrete-shard
 weights, overhead, and stamped context-window reservations. Master-local creation
 reservations bridge the asynchronous event-indexing gap; indexed state owns them

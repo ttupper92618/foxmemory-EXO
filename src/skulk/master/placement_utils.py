@@ -233,7 +233,13 @@ def reserve_instance_vram(
         assignments = instance.shard_assignments
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard[runner_id]
-            if not backend_offloads_to_vram(shard.resolved_backend):
+            # Older restored placements may predate master backend stamping.
+            # Unknown engine ownership on a GPU host cannot expose fresh VRAM;
+            # explicitly CPU-resolved shards still use only the system-RAM pool.
+            unresolved_gpu = shard.resolved_backend is None and node_id in node_vram
+            if not unresolved_gpu and not backend_offloads_to_vram(
+                shard.resolved_backend
+            ):
                 continue
             fraction = shard_fraction_of_model(shard)
             if fraction is None:

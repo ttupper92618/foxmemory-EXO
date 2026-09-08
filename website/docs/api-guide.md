@@ -3604,7 +3604,11 @@ are pending. Previews themselves do not reserve capacity. A later request can
 therefore be refused when another placement has committed the remaining memory.
 `POST /instance` also checks its GPU shard footprint against that remaining pool.
 An exact GPU placement with no usable VRAM observation is refused; it cannot
-substitute a system-RAM estimate for the missing GPU budget.
+substitute a system-RAM estimate for the missing GPU budget. Unstamped non-RPC
+shards resolve against the target node's advertised compatible backends before
+admission; missing backend evidence causes refusal. Accepted shards retain that
+backend choice. Restored unstamped shards on GPU hosts reserve capacity
+conservatively until their engine ownership is known.
 If the master refuses an already acknowledged exact-create command, `/state`
 retains `instanceFailures` with its instance ID and `errorCode: placement_failed`;
 controllers should use this terminal evidence rather than wait for a runner.

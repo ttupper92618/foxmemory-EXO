@@ -235,7 +235,10 @@ The master reserves locally created instances before queuing their events, then
 hands those reservations to indexed state. Deletion removes the commitment only
 when indexed; stale observed usage can still constrain the next load. API
 previews, ordinary placement, repair, and steward placement share this accounting.
-Exact GPU placements must also fit the remaining pool; an asynchronous refusal
+Exact GPU placements must also fit the remaining pool; omitted non-RPC backends
+are resolved and stamped from advertised compatible engines before admission.
+Legacy unstamped GPU-host shards reserve capacity conservatively.
+An asynchronous refusal
 retains `placement_failed` history for the requested instance. UMA pools retain
 their existing host-memory rules. RPC instances retain observed-memory accounting
 because llama.cpp selects their per-device partitions at runtime.

@@ -614,7 +614,10 @@ creations reserve before event submission and retire their temporary reservation
 when indexed; deletion and observed release are distinct. API preview/preflight,
 ordinary/exact placement, repair and steward paths share these inputs. Exact GPU
 refusals retain `placement_failed` instance history. RPC runtime-selected
-partitions remain observation-only; UMA retains combined-pool admission.
+partitions remain observation-only; UMA retains combined-pool admission. Non-RPC
+exact shards with omitted backends are resolved from node engine telemetry before
+context/footprint admission and persisted with that choice. Missing engine
+evidence is refused; restored unstamped GPU-host shards reserve conservatively.
 
 | Endpoint | Method | What |
 |---|---|---|

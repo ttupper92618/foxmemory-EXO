@@ -2087,7 +2087,9 @@ class API:
                 "it for current resources but never raises it. Nonpositive "
                 "explicit limits are rejected during placement. Master admission "
                 "requires observed VRAM for concrete GPU shards and accounts for "
-                "existing placements. A refused acknowledged command retains "
+                "existing placements. Omitted non-RPC backends resolve from node "
+                "engine telemetry before admission; missing evidence is refused. "
+                "A refused acknowledged command retains "
                 "placement_failed evidence in the instance failure history."
             ),
         )(self.create_instance)
