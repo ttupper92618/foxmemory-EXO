@@ -595,5 +595,12 @@ async def test_placement_apis_forward_unified_memory_classification(
 
     assert placement.shard_assignments.node_to_runner.keys() == {node_id}
     assert previews.previews
+    from skulk.shared.models.model_cards import authorized_model_card_digest
+
+    for preview in previews.previews:
+        assert preview.card_digest == (
+            authorized_model_card_digest(_card())
+            if preview.instance is not None else None
+        )
     assert seen_unified_nodes
     assert all(value == expected_unified_nodes for value in seen_unified_nodes)

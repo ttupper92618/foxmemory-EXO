@@ -140,3 +140,15 @@ configuration change, and pre-provision estimates do not prove future placement.
 Repeat card identity and compatibility checks against the target environment;
 then observe exact placement, download, runner and inference evidence as described
 above. Provider offers and budget enforcement belong to the external controller.
+
+
+Use `required_capabilities` when evaluating signed engine evidence: every
+required capability must have a supported exact engine/build/hardware match,
+and artifact-incomplete claims block admission independently. Do not infer the
+required set from the subset of engine claims returned.
+
+At placement, compare the preview's `card_digest` with the approved requirements,
+check its exact node/backend and sufficient `contextTokenLimit`, and submit only
+that returned instance. Persist the instance's complete shard card for subsequent
+state comparisons. The master can recompute context capacity from current
+resources, so recheck the accepted instance before declaring readiness.

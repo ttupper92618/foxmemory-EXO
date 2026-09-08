@@ -847,3 +847,4 @@ async def test_requirements_only_artifact_incompleteness_blocks_admission(
         str(card.model_id)
     )
     assert result.incomplete_capabilities == ("vision",)
+    assert result.required_capabilities == ("text",)

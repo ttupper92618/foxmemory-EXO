@@ -368,6 +368,7 @@ from skulk.shared.models.model_cards import (
     get_model_advisories,
     get_model_cards,
     get_model_engine_support,
+    get_model_required_capabilities,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
     same_authorized_model_card,
@@ -3625,7 +3626,11 @@ class API:
 
         return PlacementPreviewResponse(
             previews=[
-                preview.model_copy(update={"trust_requirement": trust_requirement})
+                preview.model_copy(update={
+                    "trust_requirement": trust_requirement,
+                    "card_digest": authorized_model_card_digest(model_card)
+                    if preview.instance is not None else None,
+                })
                 for preview in previews
             ]
         )
@@ -8886,6 +8891,7 @@ class API:
             discrete_gpu_memory_fraction=GPU_VRAM_WORKING_SET_FRACTION,
             unified_memory_fraction=GPU_WORKING_SET_FRACTION,
             compatible_backends=tuple(sorted(card.placement.compatible_backends)),
+            required_capabilities=tuple(sorted(get_model_required_capabilities(card))),
             engine_support=get_model_engine_support(card),
             incomplete_capabilities=tuple(
                 sorted(

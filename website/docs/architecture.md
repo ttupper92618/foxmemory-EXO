@@ -1889,3 +1889,11 @@ also exposes declared storage, backend evidence and core working-set fractions;
 it performs no placement, download, reservation or external-provider action.
 External controllers must revalidate identity and live admission before execution.
 See [API contract](./api-guide.md#read-model-capacity-requirements).
+
+
+The requirements response exports `required_capabilities` from the same pure
+`get_model_required_capabilities` resolver used by signed engine admission.
+External planners must cover its entire nonempty set, exact engine build and
+hardware restrictions. Launchable placement previews expose the same complete
+`card_digest` for binding approved requirements to the submitted instance;
+accepted state and current node admission remain authoritative afterward.

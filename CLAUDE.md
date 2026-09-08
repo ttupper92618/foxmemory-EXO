@@ -969,3 +969,11 @@ The trusted steward extension facet reads the current intelligent-fabric mode an
 collection and dispatch recheck it; private approved-action adapters must also
 recheck it on every dispatch or retry. The callback supplies no approval evidence
 or signing authority, and omitted callbacks fail closed.
+
+
+External workload binding: `GET /models/requirements.required_capabilities`
+exports the complete set used by core signed-engine admission through
+`get_model_required_capabilities`. Launchable `/instance/previews` entries expose
+`card_digest` matching requirements canonicalization. Neither field replaces
+master validation of full card identity, current backend support or the final
+resource-derived `context_token_limit`.
