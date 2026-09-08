@@ -316,6 +316,17 @@ def _stamp_llama_server_settings(
             # Donors provide memory to the driver's one context; they do not
             # launch a served instance with their own parallel-slot controls.
             continue
+        if (
+            shard.resolved_backend is None
+            and shard.model_card.gguf_cache_geometry is not None
+            and not has_rpc_donors
+        ):
+            # A worker may resolve this shard to a served engine after telemetry
+            # catches up. Default or caller-supplied slots cannot authorize that
+            # later process's recurrent allocation.
+            raise PlacementError(
+                "Backend telemetry is required for recurrent memory admission"
+            )
         if not has_rpc_donors and (
             shard.resolved_backend is None
             or not shard.resolved_backend.startswith("llama_server")

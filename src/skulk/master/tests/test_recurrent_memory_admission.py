@@ -2,13 +2,18 @@
 
 import pytest
 
-from skulk.master.placement import PlacementError, add_instance_to_placements
+from skulk.master.placement import (
+    PlacementError,
+    add_instance_to_placements,
+    place_instance,
+)
 from skulk.master.placement_utils import (
     filter_cycles_by_memory,
     get_shard_assignments_for_llama_rpc,
     usable_vram_by_node,
 )
-from skulk.master.tests.conftest import create_node_memory
+from skulk.master.tests.conftest import create_node_memory, create_node_network
+from skulk.master.tests.test_placement import place_instance_command
 from skulk.shared.models.gguf_memory import qwen35_cache_geometry
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.memory_estimate import (
@@ -241,3 +246,47 @@ def test_rpc_captures_only_the_driver_serving_settings() -> None:
         result.runner_to_shard[result.node_to_runner[donor]].llama_server_settings
         is None
     )
+
+
+def test_unresolved_exact_hybrid_placement_requires_backend_observation() -> None:
+    """Legacy RAM-only admission cannot approve a hybrid with unknown serving slots."""
+    node = NodeId()
+    instance = hybrid_instance(node, 1)
+    assignments = instance.shard_assignments
+    instance = instance.model_copy(
+        update={
+            "shard_assignments": assignments.model_copy(
+                update={
+                    "runner_to_shard": {
+                        runner: shard.model_copy(update={"resolved_backend": None})
+                        for runner, shard in assignments.runner_to_shard.items()
+                    }
+                }
+            )
+        }
+    )
+    with pytest.raises(PlacementError, match="Backend telemetry.*recurrent"):
+        add_instance_to_placements(
+            CreateInstance(instance=instance),
+            Topology(),
+            {},
+            {node: create_node_memory(Memory.from_gb(64).in_bytes)},
+        )
+
+
+def test_auto_hybrid_placement_waits_for_backend_observation() -> None:
+    """A known topology and RAM reading cannot substitute for serving controls."""
+    node = NodeId()
+    topology = Topology()
+    topology.add_node(node)
+    card = next(
+        iter(hybrid_instance(node).shard_assignments.runner_to_shard.values())
+    ).model_card
+    with pytest.raises(PlacementError, match="Backend telemetry.*recurrent"):
+        place_instance(
+            place_instance_command(card),
+            topology,
+            {},
+            {node: create_node_memory(Memory.from_gb(64).in_bytes)},
+            {node: create_node_network()},
+        )
