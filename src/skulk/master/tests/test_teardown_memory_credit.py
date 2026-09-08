@@ -8,31 +8,52 @@ refuse. These tests keep the bookkeeping explicit and verify the default
 placement inputs stay grounded in observed telemetry.
 """
 
+import asyncio
+
 import pytest
 
 from skulk.master.main import Master
+from skulk.master.placement import place_instance
+from skulk.master.tests.conftest import create_node_network
 from skulk.routing.router import get_node_id_keypair
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+)
 from skulk.shared.types.commands import (
+    CreateInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
+    PlaceInstance,
 )
-from skulk.shared.types.common import NodeId, SessionId
+from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
+    IndexedEvent,
+    InstanceCreated,
+    InstanceDeleted,
+    InstanceFailureRecorded,
     LocalForwarderEvent,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import (
+    AcceleratorMetrics,
+    MemoryUsage,
+    NodeResources,
+    SystemPerformanceProfile,
+)
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.worker.instances import (
     InstanceId,
+    InstanceMeta,
     MlxRingInstance,
     ShardAssignments,
 )
 from skulk.shared.types.worker.runners import RunnerId
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
 
 
@@ -143,3 +164,157 @@ def test_credit_expires_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     memory, _vram = master._placement_memory_inputs()
     assert memory[node_id].ram_available.in_gb == 2.0
     assert node_id not in master._recently_freed_bytes
+
+
+def _gpu_master_with_instance() -> tuple[Master, MlxRingInstance, NodeId]:
+    master = _make_master()
+    node_id = NodeId()
+    instance, _card = _instance(node_id)
+    instance = instance.model_copy(
+        update={
+            "shard_assignments": instance.shard_assignments.model_copy(
+                update={
+                    "runner_to_shard": {
+                        runner: shard.model_copy(
+                            update={"resolved_backend": "llama_cpp-cuda"}
+                        )
+                        for runner, shard in instance.shard_assignments.runner_to_shard.items()
+                    }
+                }
+            )
+        }
+    )
+    master._telemetry_view.node_memory[node_id] = _mem(64.0)
+    master._telemetry_view.node_resources[node_id] = NodeResources(
+        backends=frozenset({"llama_cpp-cuda"})
+    )
+    master._telemetry_view.node_system[node_id] = SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="nvidia", vram_total_bytes=Memory.from_gb(24).in_bytes
+        )
+    )
+    return master, instance, node_id
+
+
+async def test_local_creation_reserves_before_index_and_releases_only_after_delete() -> (
+    None
+):
+    """Queued, indexed, and deleted phases cannot expose the same capacity twice."""
+    master, instance, node_id = _gpu_master_with_instance()
+    _, initial = master._placement_memory_inputs()
+    receiver = master.event_sender.clone_receiver()
+    created = InstanceCreated(instance=instance)
+    await master._queue_control_event(created)
+    assert receiver.receive_nowait() == created
+    assert instance.instance_id not in master.state.instances
+    _, queued = master._placement_memory_inputs()
+    assert queued[node_id] < initial[node_id]
+    master._apply_indexed_event(IndexedEvent(event=created, idx=0))
+    assert master._pending_instance_reservations == {}
+    assert master._placement_memory_inputs()[1] == queued
+    deleted = InstanceDeleted(instance_id=instance.instance_id)
+    await master._queue_control_event(deleted)
+    assert master._placement_memory_inputs()[1] == queued
+    master._apply_indexed_event(IndexedEvent(event=deleted, idx=1))
+    assert master._placement_memory_inputs()[1] == initial
+
+
+async def test_refused_exact_gpu_placement_retains_failure_identity() -> None:
+    """A command accepted at the API cannot fail silently when master capacity changed."""
+    master, instance, node_id = _gpu_master_with_instance()
+    card = next(iter(instance.shard_assignments.runner_to_shard.values())).model_card
+    master._ordered_model_cards[card.model_id] = card
+    master._telemetry_view.node_system[node_id] = SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="nvidia", vram_total_bytes=Memory.from_gb(2).in_bytes
+        )
+    )
+    sender = master.command_receiver.clone_sender()
+    receiver = master.event_sender.clone_receiver()
+    task = asyncio.create_task(master._command_processor())
+    try:
+        await sender.send(
+            ForwarderCommand(
+                origin=SystemId(), command=CreateInstance(instance=instance)
+            )
+        )
+        async with asyncio.timeout(2):
+            event = await receiver.receive()
+        assert isinstance(event, InstanceFailureRecorded)
+        assert event.failure.instance_id == instance.instance_id
+        assert event.failure.error_code == "placement_failed"
+        assert master._pending_instance_reservations == {}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_raced_quick_placement_retains_acknowledged_failure_identity() -> None:
+    """Two successful preflights cannot leave a later ordered refusal unobservable."""
+    master, instance, node = _gpu_master_with_instance()
+    original = next(
+        iter(instance.shard_assignments.runner_to_shard.values())
+    ).model_card
+    card = original.model_copy(
+        update={
+            "gguf_file": "model.gguf",
+            "placement": PlacementCardConfig(
+                compatible_backends=frozenset({"llama_cpp-cuda"})
+            ),
+        }
+    )
+    master._ordered_model_cards[card.model_id] = card
+    master.state.topology.add_node(node)
+    master.state = master.state.model_copy(
+        update={
+            "node_network": {node: create_node_network()},
+        }
+    )
+    master._telemetry_view.node_system[node] = SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="nvidia", vram_total_bytes=Memory.from_gb(16).in_bytes
+        )
+    )
+    commands = [
+        PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+        )
+        for _ in range(2)
+    ]
+    memory, vram = master._placement_memory_inputs()
+    for command in commands:
+        # Both API requests see exactly the same admissible snapshot.
+        assert place_instance(
+            command,
+            master.state.topology,
+            {},
+            memory,
+            master.state.node_network,
+            node_resources=master._telemetry_view.node_resources,
+            node_vram=vram,
+        )
+    sender = master.command_receiver.clone_sender()
+    receiver = master.event_sender.clone_receiver()
+    task = asyncio.create_task(master._command_processor())
+    try:
+        for command in commands:
+            await sender.send(ForwarderCommand(origin=SystemId(), command=command))
+        async with asyncio.timeout(2):
+            first = await receiver.receive()
+            refused = await receiver.receive()
+        assert isinstance(first, InstanceCreated)
+        assert first.instance.instance_id == InstanceId(str(commands[0].command_id))
+        assert isinstance(refused, InstanceFailureRecorded)
+        assert refused.failure.instance_id == InstanceId(str(commands[1].command_id))
+        assert refused.failure.model_id == card.model_id
+        assert refused.failure.error_code == "placement_failed"
+        assert refused.failure.affected_node_ids == ()
+        assert set(master._pending_instance_reservations) == {
+            first.instance.instance_id
+        }
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

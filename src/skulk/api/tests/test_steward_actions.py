@@ -56,6 +56,27 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
 
 
+def _master_with_channels() -> Master:
+    """Initialize actual master bookkeeping with inert test-owned channels."""
+    node = NodeId("master")
+    event_sender, _ = channel[Event]()
+    global_sender, _ = channel[GlobalForwarderEvent]()
+    _, local_receiver = channel[LocalForwarderEvent]()
+    _, command_receiver = channel[ForwarderCommand]()
+    state_sender, state_receiver = channel[StateSyncMessage]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    return Master(
+        node, SessionId(master_node_id=node, election_clock=0),
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_receiver,
+        command_receiver=command_receiver,
+        state_sync_sender=state_sender,
+        state_sync_receiver=state_receiver,
+        download_command_sender=download_sender,
+    )
+
+
 def _cancel_proposal() -> StewardActionProposal:
     now = datetime.now(tz=timezone.utc)
     return StewardActionProposal(
@@ -288,7 +309,7 @@ async def test_cancel_approval_rejects_a_replacement_download_attempt() -> None:
         )
     )
     download_sender, download_receiver = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State()
     master._telemetry_view = telemetry_view  # pyright: ignore[reportPrivateUsage]
     master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
@@ -333,7 +354,7 @@ async def test_kill_switch_blocks_failover_recovery_dispatch(
     )
     event_sender, event_receiver = channel[Event]()
     download_sender, download_receiver = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(
         steward_action_proposals={proposal.proposal_id: proposal}
     )
@@ -371,7 +392,7 @@ async def test_stop_approval_rejects_replaced_instance_state() -> None:
         created_at=now,
         expires_at=now + timedelta(minutes=10),
     )
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(instances={replacement.instance_id: replacement})
     master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
 
@@ -417,7 +438,7 @@ async def test_stop_and_restart_approvals_share_target_reservation(
         decided_by="trusted_fabric_operator",
         command_id=CommandId("reserved-command"),
     )
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(instances={instance.instance_id: instance})
     master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
         candidate.proposal_id: candidate,
@@ -445,7 +466,7 @@ async def test_restart_waits_for_teardown_before_replacement(
     )
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(instances={instance.instance_id: instance})
     master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
         proposal.proposal_id: proposal
@@ -543,7 +564,7 @@ async def test_restart_refuses_changed_card_before_teardown() -> None:
     )
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(
         instances={instance.instance_id: instance},
         steward_action_proposals={proposal.proposal_id: approved},
@@ -588,7 +609,7 @@ async def test_approved_restart_reissues_teardown_once_after_master_failover() -
     )
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(
         instances={instance.instance_id: instance},
         steward_action_proposals={proposal.proposal_id: proposal},
@@ -653,7 +674,7 @@ async def test_stop_cleanup_waits_for_replicated_dispatch(
             ),
         )
     )
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(instances={instance.instance_id: instance})
     master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
@@ -737,7 +758,7 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
     replacement = original.model_copy(update={"instance_id": replacement_id})
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(
         instances={original.instance_id: original},
         steward_action_proposals={proposal.proposal_id: proposal},
@@ -831,7 +852,7 @@ async def test_dispatched_place_and_stop_reissue_after_master_failover(
     )
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(
         instances={original.instance_id: original},
         steward_action_proposals={
@@ -902,7 +923,7 @@ async def test_place_approvals_reserve_capacity_before_state_echo(
     first = proposal()
     second = proposal()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State()
     master._ordered_steward_proposals = {}  # pyright: ignore[reportPrivateUsage]
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
@@ -966,7 +987,7 @@ async def test_restart_replacements_reserve_capacity_before_state_echo(
     second = proposal(second_original)
     event_sender, _ = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    master = object.__new__(Master)
+    master = _master_with_channels()
     master.state = State(
         steward_action_proposals={
             first.proposal_id: first,

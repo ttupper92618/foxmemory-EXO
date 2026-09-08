@@ -107,6 +107,18 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 ## Architecture
 
 ### Node Composition
+
+Exact non-RPC placements resolve omitted backends from advertised compatible
+engines before memory admission; restored unstamped GPU-host shards reserve
+conservatively. Exact and quick-launch master refusals retain correlated instance
+failure history after an API acknowledgement.
+
+Discrete-GPU placement combines observed free memory with committed concrete-shard
+weights, overhead, and stamped context-window reservations. Master-local creation
+reservations bridge the asynchronous event-indexing gap; indexed state owns them
+thereafter. API previews, normal/exact admission, repair, and steward paths use the
+same budget. Exact-create admission failure retains instance failure history.
+RPC runtime-selected partitions remain observation-only; UMA rules are unchanged.
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. `AUTHORITY_MESSAGES` has bounded producer admission plus a distinct bounded Python egress queue and carries only signed public consensus metadata on the default authenticated gossipsub behavior. Ordinary Python control backlog cannot queue ahead of election or authority traffic, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
 - **Worker**: Handles inference tasks, downloads models, manages runner processes

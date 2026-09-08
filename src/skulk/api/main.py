@@ -2085,7 +2085,12 @@ class API:
                 "card already present in the authorized local catalog. A positive "
                 "contextTokenLimit caps the requested window: admission may lower "
                 "it for current resources but never raises it. Nonpositive "
-                "explicit limits are rejected during placement."
+                "explicit limits are rejected during placement. Master admission "
+                "requires observed VRAM for concrete GPU shards and accounts for "
+                "existing placements. Omitted non-RPC backends resolve from node "
+                "engine telemetry before admission; missing evidence is refused. "
+                "A refused acknowledged command retains "
+                "placement_failed evidence in the instance failure history."
             ),
         )(self.create_instance)
         self.app.post(
@@ -2128,7 +2133,9 @@ class API:
                 "distribution, or an authenticated add; it never discovers an unknown "
                 "Hugging Face repository as a side effect. "
                 "failures retain a readable error message and expose a stable category in the "
-                "X-Skulk-Placement-Failure response header."
+                "X-Skulk-Placement-Failure response header. If capacity changes after "
+                "acknowledgement, master admission retains placement_failed in "
+                "instanceFailures under the acknowledged instance ID."
             ),
         )(self.place_instance)
         self.app.get(
@@ -3147,6 +3154,7 @@ class API:
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
+                        current_instances=self.state.instances,
                     ),
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
@@ -3267,6 +3275,7 @@ class API:
                     self._telemetry_view.node_system,
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
+                    current_instances=self.state.instances,
                 ),
                 unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                     self._telemetry_view.node_system,
@@ -3391,6 +3400,7 @@ class API:
             self._telemetry_view.node_system,
             self._telemetry_view.node_resources,
             node_memory=self._telemetry_view.node_memory,
+            current_instances=self.state.instances,
         )
         placement_unified_memory_gpu_nodes = unified_memory_gpu_node_ids(
             self._telemetry_view.node_system,

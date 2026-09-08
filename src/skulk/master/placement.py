@@ -28,7 +28,13 @@ from skulk.shared.models.capabilities import (
     family_predates_in_process_llama_cpp,
     resolve_model_capability_profile,
 )
-from skulk.shared.models.memory_estimate import instance_context_token_limit
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    backend_offloads_to_vram,
+    estimate_shard_footprint,
+    instance_context_token_limit,
+    shard_fraction_of_model,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -156,6 +162,7 @@ def add_instance_to_placements(
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     approved_remote_code_identities: AbstractSet[str] | None = None,
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     """Validate and add one caller-specified exact instance placement.
 
@@ -168,6 +175,7 @@ def add_instance_to_placements(
         unified_memory_gpu_nodes: Nodes whose GPU allocations use system RAM.
         approved_remote_code_identities: Deprecated legacy approval set retained
             for compatibility with older call sites.
+        node_resources: Advertised engines used to resolve unstamped exact shards.
 
     Returns:
         Existing placements plus the validated, memory-stamped instance.
@@ -194,6 +202,37 @@ def add_instance_to_placements(
         command.instance,
         approved_remote_code_identities,
     )
+    if not isinstance(command.instance, LlamaRpcInstance):
+        resolved_shards = dict(assignments.runner_to_shard)
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = resolved_shards[runner_id]
+            if shard.resolved_backend is not None:
+                continue
+            resources = (node_resources or {}).get(node_id)
+            if resources is None:
+                # Production callers always supply resources. Retain the legacy
+                # standalone RAM-only helper contract, but never infer a safe
+                # CPU engine for a known GPU or a missing production observation.
+                if node_resources is not None or node_id in (node_vram or {}):
+                    raise PlacementError(
+                        "Backend telemetry is required for unresolved exact placement"
+                    )
+                continue
+            backend = resolve_node_backend(
+                _card_platform_backends(shard.model_card, resources),
+                shard.model_card.placement.backend_preference,
+                resources.backends,
+            )
+            if backend is None:
+                raise PlacementError("No compatible backend for exact placement")
+            # Stamp before deriving context and checking the footprint: otherwise
+            # the worker can pick a GPU after admission charged only system RAM.
+            resolved_shards[runner_id] = shard.model_copy(
+                update={"resolved_backend": backend}
+            )
+        assignments = assignments.model_copy(
+            update={"runner_to_shard": resolved_shards}
+        )
     fixed_memory_by_node: dict[NodeId, Memory] = {}
     first_shard = next(iter(assignments.runner_to_shard.values()), None)
     if first_shard is not None:
@@ -228,7 +267,32 @@ def add_instance_to_placements(
         # the preview maximum. Raising it silently can multiply load-time KV
         # allocation and defeat the caller's resource plan.
         ceiling = requested_limit if ceiling is None else min(ceiling, requested_limit)
-    instance = command.instance.model_copy(update={"context_token_limit": ceiling})
+    instance = command.instance.model_copy(
+        update={"context_token_limit": ceiling, "shard_assignments": assignments}
+    )
+    if not isinstance(instance, LlamaRpcInstance):
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard[runner_id]
+            available = (node_vram or {}).get(node_id)
+            fraction = shard_fraction_of_model(shard)
+            if not backend_offloads_to_vram(shard.resolved_backend):
+                continue
+            if available is None or fraction is None:
+                raise PlacementError(
+                    "GPU memory telemetry and a concrete shard are required for exact placement"
+                )
+            # A context ceiling alone is not a weights admission check: it can
+            # become zero, or fall back to the card when KV geometry is absent.
+            # Exact placements must not bypass the already-committed GPU budget.
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                context_budget=ceiling
+                if ceiling is not None
+                else KV_CONTEXT_BUDGET_TOKENS,
+            )
+            if ceiling == 0 or footprint > available:
+                raise PlacementError("Insufficient GPU memory for the exact placement")
     return {**current_instances, instance.instance_id: instance}
 
 

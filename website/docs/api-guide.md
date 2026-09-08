@@ -3593,3 +3593,26 @@ to the preview maximum. Nonpositive explicit limits are rejected during placemen
 An omitted limit retains the instance schema's model/engine backfill, still
 bounded by admission. Controllers budgeting a specific load-time KV allocation
 should set that exact limit and verify it on the accepted instance.
+
+
+### Committed GPU capacity during placement
+
+Placement previews and normal launch admission account for existing concrete GPU
+shards, including their stamped context windows, before load telemetry catches
+up. The master also reserves newly accepted creations while their indexed events
+are pending. Previews themselves do not reserve capacity. A later request can
+therefore be refused when another placement has committed the remaining memory.
+`POST /instance` also checks its GPU shard footprint against that remaining pool.
+An exact GPU placement with no usable VRAM observation is refused; it cannot
+substitute a system-RAM estimate for the missing GPU budget. Unstamped non-RPC
+shards resolve against the target node's advertised compatible backends before
+admission; missing backend evidence causes refusal. Accepted shards retain that
+backend choice. Restored unstamped shards on GPU hosts reserve capacity
+conservatively until their engine ownership is known.
+If capacity changes after acknowledgement and the master refuses either an
+exact-create or quick-launch command, `/state` retains `instanceFailures` with
+the acknowledged instance ID and `errorCode: placement_failed`;
+controllers should use this terminal evidence rather than wait for a runner.
+Removing a placement does not promise immediate GPU memory release. RPC instances
+continue using observed memory because their per-device allocations are chosen
+by llama.cpp at runtime; UMA nodes retain their combined host/GPU memory rules.
