@@ -612,8 +612,9 @@ Discrete-GPU admission uses `usable_vram_by_node` / `reserve_instance_vram`:
 footprints)`. Footprints use each instance's stamped context window. Master-local
 creations reserve before event submission and retire their temporary reservation
 when indexed; deletion and observed release are distinct. API preview/preflight,
-ordinary/exact placement, repair and steward paths share these inputs. Exact GPU
-refusals retain `placement_failed` instance history. RPC runtime-selected
+ordinary/exact placement, repair and steward paths share these inputs. Exact and
+quick-launch refusals retain `placement_failed` under their acknowledged instance
+identity even when an earlier API preflight passed. RPC runtime-selected
 partitions remain observation-only; UMA retains combined-pool admission. Non-RPC
 exact shards with omitted backends are resolved from node engine telemetry before
 context/footprint admission and persisted with that choice. Missing engine

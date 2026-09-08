@@ -2133,7 +2133,9 @@ class API:
                 "distribution, or an authenticated add; it never discovers an unknown "
                 "Hugging Face repository as a side effect. "
                 "failures retain a readable error message and expose a stable category in the "
-                "X-Skulk-Placement-Failure response header."
+                "X-Skulk-Placement-Failure response header. If capacity changes after "
+                "acknowledgement, master admission retains placement_failed in "
+                "instanceFailures under the acknowledged instance ID."
             ),
         )(self.place_instance)
         self.app.get(

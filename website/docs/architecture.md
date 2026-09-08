@@ -238,8 +238,8 @@ previews, ordinary placement, repair, and steward placement share this accountin
 Exact GPU placements must also fit the remaining pool; omitted non-RPC backends
 are resolved and stamped from advertised compatible engines before admission.
 Legacy unstamped GPU-host shards reserve capacity conservatively.
-An asynchronous refusal
-retains `placement_failed` history for the requested instance. UMA pools retain
+An asynchronous exact or quick-launch refusal retains `placement_failed` history
+for the acknowledged instance identity, including when API preflight succeeded. UMA pools retain
 their existing host-memory rules. RPC instances retain observed-memory accounting
 because llama.cpp selects their per-device partitions at runtime.
 

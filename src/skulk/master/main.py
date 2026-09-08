@@ -2935,6 +2935,27 @@ class Master:
                                 error_message="Exact placement failed current admission checks.",
                             )
                         )
+                    elif isinstance(forwarder_command.command, PlaceInstance):
+                        # Quick-launch preflight also precedes ordered admission.
+                        # Its acknowledged instance ID is derived from the command,
+                        # even when no concrete placement could be constructed.
+                        refused = forwarder_command.command
+                        instance_id = InstanceId(str(refused.command_id))
+                        if instance_id not in self._placement_reservations(
+                            self.state.instances
+                        ):
+                            await self._queue_control_event(
+                                InstanceFailureRecorded(
+                                    failure=InstanceFailure(
+                                        instance_id=instance_id,
+                                        model_id=refused.model_card.model_id,
+                                        system_role=refused.system_role,
+                                        error_code="placement_failed",
+                                        error_message="Quick placement failed current admission checks.",
+                                        recorded_at=datetime.now(tz=timezone.utc),
+                                    )
+                                )
+                            )
                     logger.opt(exception=error).warning("Placement command refused")
                 except ValueError as e:
                     logger.opt(exception=e).warning("Error in command processor")

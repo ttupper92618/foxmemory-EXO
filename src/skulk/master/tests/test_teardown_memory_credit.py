@@ -13,12 +13,20 @@ import asyncio
 import pytest
 
 from skulk.master.main import Master
+from skulk.master.placement import place_instance
+from skulk.master.tests.conftest import create_node_network
 from skulk.routing.router import get_node_id_keypair
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+)
 from skulk.shared.types.commands import (
     CreateInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
+    PlaceInstance,
 )
 from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
@@ -40,11 +48,12 @@ from skulk.shared.types.profiling import (
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.worker.instances import (
     InstanceId,
+    InstanceMeta,
     MlxRingInstance,
     ShardAssignments,
 )
 from skulk.shared.types.worker.runners import RunnerId
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
 
 
@@ -235,6 +244,77 @@ async def test_refused_exact_gpu_placement_retains_failure_identity() -> None:
         assert event.failure.instance_id == instance.instance_id
         assert event.failure.error_code == "placement_failed"
         assert master._pending_instance_reservations == {}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_raced_quick_placement_retains_acknowledged_failure_identity() -> None:
+    """Two successful preflights cannot leave a later ordered refusal unobservable."""
+    master, instance, node = _gpu_master_with_instance()
+    original = next(
+        iter(instance.shard_assignments.runner_to_shard.values())
+    ).model_card
+    card = original.model_copy(
+        update={
+            "gguf_file": "model.gguf",
+            "placement": PlacementCardConfig(
+                compatible_backends=frozenset({"llama_cpp-cuda"})
+            ),
+        }
+    )
+    master._ordered_model_cards[card.model_id] = card
+    master.state.topology.add_node(node)
+    master.state = master.state.model_copy(
+        update={
+            "node_network": {node: create_node_network()},
+        }
+    )
+    master._telemetry_view.node_system[node] = SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="nvidia", vram_total_bytes=Memory.from_gb(16).in_bytes
+        )
+    )
+    commands = [
+        PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+        )
+        for _ in range(2)
+    ]
+    memory, vram = master._placement_memory_inputs()
+    for command in commands:
+        # Both API requests see exactly the same admissible snapshot.
+        assert place_instance(
+            command,
+            master.state.topology,
+            {},
+            memory,
+            master.state.node_network,
+            node_resources=master._telemetry_view.node_resources,
+            node_vram=vram,
+        )
+    sender = master.command_receiver.clone_sender()
+    receiver = master.event_sender.clone_receiver()
+    task = asyncio.create_task(master._command_processor())
+    try:
+        for command in commands:
+            await sender.send(ForwarderCommand(origin=SystemId(), command=command))
+        async with asyncio.timeout(2):
+            first = await receiver.receive()
+            refused = await receiver.receive()
+        assert isinstance(first, InstanceCreated)
+        assert first.instance.instance_id == InstanceId(str(commands[0].command_id))
+        assert isinstance(refused, InstanceFailureRecorded)
+        assert refused.failure.instance_id == InstanceId(str(commands[1].command_id))
+        assert refused.failure.model_id == card.model_id
+        assert refused.failure.error_code == "placement_failed"
+        assert refused.failure.affected_node_ids == ()
+        assert set(master._pending_instance_reservations) == {
+            first.instance.instance_id
+        }
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

@@ -3609,8 +3609,9 @@ shards resolve against the target node's advertised compatible backends before
 admission; missing backend evidence causes refusal. Accepted shards retain that
 backend choice. Restored unstamped shards on GPU hosts reserve capacity
 conservatively until their engine ownership is known.
-If the master refuses an already acknowledged exact-create command, `/state`
-retains `instanceFailures` with its instance ID and `errorCode: placement_failed`;
+If capacity changes after acknowledgement and the master refuses either an
+exact-create or quick-launch command, `/state` retains `instanceFailures` with
+the acknowledged instance ID and `errorCode: placement_failed`;
 controllers should use this terminal evidence rather than wait for a runner.
 Removing a placement does not promise immediate GPU memory release. RPC instances
 continue using observed memory because their per-device allocations are chosen
