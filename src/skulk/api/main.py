@@ -8892,7 +8892,7 @@ class API:
                     {
                         claim.capability_id
                         for claim in card.registry_capability_claims
-                        if claim.status == "incomplete"
+                        if claim.scope == "artifact" and claim.status == "incomplete"
                     }
                 )
             ),

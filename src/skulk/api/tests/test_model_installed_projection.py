@@ -18,6 +18,7 @@ from skulk.shared.models.model_cards import (
     VisionCardConfig,
     authorized_model_card_digest,
 )
+from skulk.shared.models.registry import RegistryCapabilityClaim
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.store.installed_cards import (
@@ -806,3 +807,43 @@ async def test_requirements_projector_and_non_text_memory(
         )
     else:
         assert result.estimated_memory_bytes is None
+
+
+async def test_requirements_only_artifact_incompleteness_blocks_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-level evidence cannot manufacture an artifact admission blocker."""
+    claims = (
+        RegistryCapabilityClaim(
+            capability_id="model-note",
+            scope="model",
+            status="incomplete",
+            source="agent_analysis",
+            confidence=1.0,
+        ),
+        RegistryCapabilityClaim(
+            capability_id="vision",
+            scope="artifact",
+            status="incomplete",
+            source="artifact_manifest",
+            confidence=1.0,
+        ),
+        RegistryCapabilityClaim(
+            capability_id="text",
+            scope="artifact",
+            status="complete",
+            source="artifact_manifest",
+            confidence=1.0,
+        ),
+    )
+    card = _card("a").model_copy(update={"registry_capability_claims": claims})
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=card,
+        current_registry_card_value=card,
+        local_record=None,
+    )
+    result = await _api_with_store(_RegistryStoreClient([])).get_model_requirements(
+        str(card.model_id)
+    )
+    assert result.incomplete_capabilities == ("vision",)
