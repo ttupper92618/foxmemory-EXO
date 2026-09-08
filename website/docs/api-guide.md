@@ -561,6 +561,15 @@ The mounted model must also declare `TextGeneration`; speech-only cards return
 
 ### Context-length limits
 
+Ordinary text requests prefer ready or running placements over placements still
+loading. Among equally ready placements, ordinary model instances take precedence
+over the resident steward, then active text-task counts balance requests. Retained
+completed tasks do not count as load. A placement with any failed or shutting-down
+runner, or without an initial status for every rank, is unavailable. Explicit
+steward/canary pins never fall back to a sibling;
+an unavailable pin or a model with no viable placement emits `instance_unavailable`
+for the correlated task instead of leaving the request queued indefinitely.
+
 Every placed instance has a usable context limit: the smaller of the model's
 advertised context length and the number of KV-cache tokens that fit in memory
 next to the model weights on the hosting node(s). Requests are admitted
